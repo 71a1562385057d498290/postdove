@@ -1,0 +1,4 @@
+if !/^(postmaster|abuse)@/
+/^.*@\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\]$/ REJECT IP not allowed
+endif
+

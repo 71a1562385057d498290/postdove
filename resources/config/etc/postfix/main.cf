@@ -1,0 +1,508 @@
+# myhostname (default: see "postconf -d" output)
+# The internet hostname of this mail system.
+# The default is to use the fully-qualified domain name (FQDN) from gethostname(),
+# or to use the non-FQDN result from gethostname() and append ".$mydomain". $myhostname is used as a default value for many other configuration parameters.
+#
+#	Example:
+#	myhostname = host.example.com
+myhostname =
+
+# mydomain (default: see "postconf -d" output)
+# The internet domain name of this mail system. 
+# The default is to use $myhostname minus the first component, or "localdomain" (Postfix 2.3 and later).
+# $mydomain is used as a default value for many other configuration parameters.
+#
+#	Example:
+#	mydomain = domain.tld
+mydomain =
+
+# myorigin (default: $myhostname)
+# The domain name that locally-posted mail appears to come from, and that locally posted mail is delivered to.
+# The default, $myhostname, is adequate for small sites.
+# If you run a domain with multiple machines, you should (1) change this to $mydomain and (2) set up a domain-wide alias database that aliases each user to user@that.users.mailhost.
+#
+#	Example:
+#	myorigin = $mydomain
+myorigin = $mydomain
+
+# mydestination (default: $myhostname, localhost.$mydomain, localhost)
+# The list of domains that are delivered via the $local_transport mail delivery transport.
+# By default this is the Postfix local(8) delivery agent which looks up all recipients in /etc/passwd and /etc/aliases.
+# The SMTP server validates recipient addresses with $local_recipient_maps and rejects non-existent recipients. See also the local domain class in the ADDRESS_CLASS_README file.
+#
+# The default mydestination value specifies names for the local machine only. On a mail domain gateway, you should also include $mydomain.
+# The $local_transport delivery method is also selected for mail addressed to user@[the.net.work.address] of the mail system (the IP addresses specified with the inet_interfaces and proxy_interfaces parameters).
+#
+#	Warnings:
+#	Do not specify the names of virtual domains - those domains are specified elsewhere. See VIRTUAL_README for more information.
+#	Do not specify the names of domains that this machine is backup MX host for. See STANDARD_CONFIGURATION_README for how to set up backup MX hosts.
+#
+#	By default, the Postfix SMTP server rejects mail for recipients not listed with the local_recipient_maps parameter.
+#	See the postconf(5) manual for a description of the local_recipient_maps and unknown_local_recipient_reject_code parameters.
+# 
+# Specify a list of host or domain names, "/file/name" or "type:table" patterns, separated by commas and/or whitespace.
+# A "/file/name" pattern is replaced by its contents; a "type:table" lookup table is matched when a name matches a lookup key (the lookup result is ignored).
+# Continue long lines by starting the next line with whitespace.
+#
+#	Examples:
+#	mydestination = $myhostname, localhost.$mydomain $mydomain
+#	mydestination = $myhostname, localhost.$mydomain www.$mydomain, ftp.$mydomain
+mydestination = localhost.localdomain, localhost
+
+# mynetworks (default: see "postconf -d" output)
+# The list of "trusted" remote SMTP clients that have more privileges than "strangers".
+# In particular, "trusted" SMTP clients are allowed to relay mail through Postfix. See the smtpd_relay_restrictions parameter description in the postconf(5) manual.
+# You can specify the list of "trusted" network addresses by hand or you can let Postfix do it for you (which is the default). See the description of the mynetworks_style parameter for more information.
+# If you specify the mynetworks list by hand, Postfix ignores the mynetworks_style setting.
+# Specify a list of network addresses or network/netmask patterns, separated by commas and/or whitespace. Continue long lines by starting the next line with whitespace.
+# The netmask specifies the number of bits in the network part of a host address. You can also specify "/file/name" or "type:table" patterns.
+# A "/file/name" pattern is replaced by its contents; a "type:table" lookup table is matched when a table entry matches a lookup string (the lookup result is ignored).
+# The list is matched left to right, and the search stops on the first match. Specify "!pattern" to exclude an address or network block from the list. The form "!/file/name" is supported only in Postfix version 2.4 and later.
+#	Note 1: Pattern matching of domain names is controlled by the or absence of "mynetworks" in the parent_domain_matches_subdomains parameter value.
+#	Note 2: IP version 6 address information must be specified inside [] in the mynetworks value, and in files specified with "/file/name".
+#		IP version 6 addresses contain the ":" character, and would otherwise be confused with a "type:table" pattern.
+#
+#	Examples:
+#	mynetworks = 127.0.0.0/8 168.100.189.0/28
+#	mynetworks = !192.168.0.1, 192.168.0.0/28
+#	mynetworks = 127.0.0.0/8 168.100.189.0/28 [::1]/128 [2001:240:587::]/64
+#	mynetworks = $config_directory/mynetworks
+#	mynetworks = hash:/etc/postfix/network_table
+mynetworks = 127.0.0.0/8
+
+# mynetworks_style (default: Postfix ≥ 3.0: host, Postfix < 3.0: subnet)
+# The method to generate the default value for the mynetworks parameter. This is the list of trusted networks for relay access control etc.
+# Specify "mynetworks_style = host" when Postfix should "trust" only the local machine.
+# Specify "mynetworks_style = subnet" when Postfix should "trust" remote SMTP clients in the same IP subnetworks as the local machine. On Linux, this works correctly only with interfaces specified with the "ifconfig" command.
+# Specify "mynetworks_style = class" when Postfix should "trust" remote SMTP clients in the same IP class A/B/C networks as the local machine.
+# Caution: this may cause Postfix to "trust" your entire provider's network. Instead, specify an explicit mynetworks list by hand, as described with the mynetworks configuration parameter.
+mynetworks_style = host
+
+# inet_interfaces (default: all)
+# The network interface addresses that this mail system receives mail on.
+# Specify "all" to receive mail on all network interfaces (default), and "loopback-only" to receive mail on loopback network interfaces only (Postfix version 2.2 and later).
+# The parameter also controls delivery of mail to user@[ip.address].
+# Note 1: you need to stop and start Postfix when this parameter changes.
+# Note 2: address information may be enclosed inside [], but this form is not required here.
+# When inet_interfaces specifies just one IPv4 and/or IPv6 address that is not a loopback address, the Postfix SMTP client will use this address as the IP source address for outbound mail.
+# Support for IPv6 is available in Postfix version 2.2 and later.
+# On a multi-homed firewall with separate Postfix instances listening on the "inside" and "outside" interfaces, this can prevent each instance from being able to reach remote SMTP servers on the "other side" of the firewall.
+# Setting smtp_bind_address to 0.0.0.0 avoids the potential problem for IPv4, and setting smtp_bind_address6 to :: solves the problem for IPv6.
+# A better solution for multi-homed firewalls is to leave inet_interfaces at the default value and instead use explicit IP addresses in the master.cf SMTP server definitions.
+# This preserves the Postfix SMTP client's loop detection, by ensuring that each side of the firewall knows that the other IP address is still the same host. Setting $inet_interfaces to a single IPv4 and/or IPV6 address is primarily useful with virtual hosting of domains on secondary IP addresses, when each IP address serves a different domain (and has a different $myhostname setting).
+# See also the proxy_interfaces parameter, for network addresses that are forwarded to Postfix by way of a proxy or address translator.
+#
+#	Examples:
+#	inet_interfaces = all (DEFAULT)
+#	inet_interfaces = loopback-only (Postfix version 2.2 and later)
+#	inet_interfaces = 127.0.0.1
+#	inet_interfaces = 127.0.0.1, [::1] (Postfix version 2.2 and later)
+#	inet_interfaces = 192.168.1.2, 127.0.0.1
+inet_interfaces = all
+
+# proxy_interfaces (default: empty)
+# The network interface addresses that this mail system receives mail on by way of a proxy or network address translation unit.
+# This feature is available in Postfix 2.0 and later.
+# You must specify your "outside" proxy/NAT addresses when your system is a backup MX host for other domains, otherwise mail delivery loops will happen when the primary MX host is down.
+#
+#	Example:
+#	proxy_interfaces = 1.2.3.4
+# proxy_interfaces =
+
+# inet_protocols (default: see 'postconf -d output')
+# The Internet protocols Postfix will attempt to use when making or accepting connections.
+# Specify one or more of "ipv4" or "ipv6", separated by whitespace or commas.
+# The form "all" is equivalent to "ipv4, ipv6" or "ipv4", depending on whether the operating system implements IPv6.
+#
+#	Examples:
+#	inet_protocols = ipv4
+#	inet_protocols = all (DEFAULT)
+#	inet_protocols = ipv6
+#	inet_protocols = ipv4, ipv6
+inet_protocols = ipv4
+
+# smtpd_banner (default: $myhostname ESMTP $mail_name)
+# The text that follows the 220 status code in the SMTP greeting banner. Some people like to see the mail version advertised. By default, Postfix shows no version.
+# You MUST specify $myhostname at the start of the text. This is required by the SMTP protocol.
+#
+#	Example:
+#	smtpd_banner = $myhostname ESMTP $mail_name ($mail_version)
+smtpd_banner = $myhostname ESMTP
+
+# biff (default: yes)
+# Whether or not to use the local biff service. This service sends "new mail" notifications to users who have requested new mail notification with the UNIX command "biff y".
+# For compatibility reasons this feature is on by default. On systems with lots of interactive users, the biff service can be a performance drain. Specify "biff = no" in main.cf to disable.
+biff = no
+
+# readme_directory (default: see "postconf -d" output)
+# The location of Postfix README files that describe how to build, configure
+# or operate a specific Postfix subsystem or feature.
+readme_directory = no
+
+# compatibility_level (default: 0)
+# A safety net that causes Postfix to run with backwards-compatible default settings after an upgrade to a newer Postfix version.
+# With backwards compatibility turned on (the main.cf compatibility_level value is less than the Postfix built-in value), 
+# Postfix looks for settings that are left at their implicit default value, and logs a message when a backwards-compatible default setting is required.
+#
+#	using backwards-compatible default setting name=value
+#		to [accept a specific client request]
+#
+#	using backwards-compatible default setting name=value
+#		to [enable specific Postfix behavior]
+compatibility_level = 2
+
+# append_dot_mydomain (default: Postfix ≥ 3.0: no, Postfix < 3.0: yes)
+# With locally submitted mail, append the string ".$mydomain" to addresses that have no ".domain" information.
+# With remotely submitted mail, append the string ".$remote_header_rewrite_domain" instead.
+# Note 1: this feature is enabled by default. If disabled, users will not be able to send mail to "user@partialdomainname" but will have to specify full domain names instead.
+# Note 2: with Postfix version 2.2, message header address rewriting happens only when one of the following conditions is true:
+#
+#	The message is received with the Postfix sendmail(1) command,
+#	The message is received from a network client that matches $local_header_rewrite_clients,
+#	The message is received from the network, and the remote_header_rewrite_domain parameter specifies a non-empty value.
+#
+# To get the behavior before Postfix version 2.2, specify "local_header_rewrite_clients = static:all".
+append_dot_mydomain = no
+
+# disable_vrfy_command (default: no)
+# Disable the SMTP VRFY command. This stops some techniques used to harvest email addresses.
+#
+#	Example:
+#	disable_vrfy_command = no
+disable_vrfy_command = yes
+
+# mail_owner (default: postfix)
+# The UNIX system account that owns the Postfix queue and most Postfix daemon processes.
+# Specify the name of an unprivileged user account that does not share a user or group ID with other accounts, and that owns no other files or processes on the system. 
+# In particular, don't specify nobody or daemon. PLEASE USE A DEDICATED USER ID AND GROUP ID.
+# When this parameter value is changed you need to re-run "postfix set-permissions" (with Postfix version 2.0 and earlier: "/etc/postfix/post-install set-permissions".
+mail_owner = postfix
+
+# Local domains
+alias_maps = hash:/etc/postfix/smtpd_local_aliases
+alias_database = hash:/etc/postfix/smtpd_local_aliases
+
+# Do not accept local users as recipients unless they are listed in the $alias_maps
+local_recipient_maps = $alias_maps
+
+
+
+# local_transport (default: local:$myhostname)
+# The default mail delivery transport and next-hop destination for final delivery to domains listed with mydestination, and for [ipaddress] destinations that match $inet_interfaces or $proxy_interfaces.
+# This information can be overruled with the transport(5) table.
+# By default, local mail is delivered to the transport called "local", which is just the name of a service that is defined the master.cf file.
+# Specify a string of the form transport:nexthop, where transport is the name of a mail delivery transport defined in master.cf.
+# The :nexthop destination is optional; its syntax is documented in the manual page of the corresponding delivery agent.
+# Beware: if you override the default local delivery agent then you need to review the LOCAL_RECIPIENT_README document, otherwise the SMTP server may reject mail for local recipients.
+#
+# local_transport = error:5.7.1 local transport disabled
+
+# Note: If you want to completely disable the local delivery agent, you can do so in the master.cf configuration file
+#
+# Blocking local delivery:
+# "[...] the essential ingredient is an empty "mydestination".
+# This assumes that mail to local accounts should also not be delivered locally when submitted via sendmail(1).
+# If you only want to block local delivery via SMTP, but want to have it continue for local submission via sendmail(1),
+# then you can set local_recipient_maps to reject all users by specifying an empty table - which is rather different from an empty list of tables."
+# Empty table means all local recipients rejected by smtpd(8)
+#
+# local_recipient_maps = texthash:/dev/null
+
+
+
+# unknown_local_recipient_reject_code (default: 550)
+# The numerical Postfix SMTP server response code when a recipient address is local, and $local_recipient_maps specifies a list of lookup tables that does not match the recipient.
+# A recipient address is local when its domain matches $mydestination, $proxy_interfaces or $inet_interfaces.
+# The default setting is 550 (reject mail) but it is safer to initially use 450 (try again later) so you have time to find out if your local_recipient_maps settings are OK.
+#
+#	Example:
+#	unknown_local_recipient_reject_code = 450
+#
+# This feature is available in Postfix 2.0 and later.
+unknown_local_recipient_reject_code = 550
+
+# Use maildir format for local delivery; just in case we decide to support local accounts.
+# When using maildir format you need to make sure that the user's mail directory is created beforehand under $mail_spool_directory
+# and that it has the correct ownership and permissions. Postfix should be able to take care of the rest.
+#
+#	Example:
+#	With mail_spool_directory set to /var/mail/ and user 'test', you need to create the /var/mail/test directory
+#
+# mail_spool_directory = /var/mail/
+
+# Use mbox format for local delivery; just in case we decide to support local accounts.
+# When using mbox format Postfix should be able to automatically create the necessary files under $mail_spool_directory
+mail_spool_directory = /var/mail
+
+# Virtual mailbox domains
+# virtual_transport = virtual
+virtual_transport = lmtp:unix:private/dovecot-lmtp
+virtual_mailbox_base = /home/virtualmail
+virtual_mailbox_domains = hash:/etc/postfix/smtpd_map_virtual_domains
+virtual_mailbox_maps = hash:/etc/postfix/smtpd_map_virtual_mailboxes
+
+# Virtual mailbox domains: permissions
+virtual_uid_maps = hash:/etc/postfix/smtpd_map_virtual_domains_uids
+virtual_gid_maps = hash:/etc/postfix/smtpd_map_virtual_domains_gids
+
+# Virtual domain aliases
+virtual_alias_domains = hash:/etc/postfix/smtpd_map_virtual_alias_domains
+virtual_alias_maps = hash:/etc/postfix/smtpd_map_virtual_aliases
+
+# Relay domains
+relay_domains =
+
+# Misc reject codes
+unknown_address_reject_code = 550
+unknown_client_reject_code = 550
+unknown_hostname_reject_code = 550
+# unverified_recipient_reject_code = 550
+# unverified_sender_reject_code = 550
+
+# SMTP SASL authentication
+# Note: don't forget to configure the auth socket in dovecot,
+# and to include the authentication requirements in smtpd_client_restrictions
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+# Do not require auth on port 25. Auth is required for submission, on port 587.
+# On port 25 delivery is limitted to our domains only
+smtpd_sasl_auth_enable = no
+smtpd_sasl_security_options = noanonymous, noplaintext
+
+# Not all clients recognize the AUTH capability as defined by the SASL authentication RFC. 
+# Some historical implementations expect the server to send an "=" as separator between the AUTH verb and the list of mechanisms that follows it.
+# The broken_sasl_auth_clients configuration option lets Postfix repeat the AUTH statement in a form that these broken clients understand:
+#	
+#	Example:
+#	broken_sasl_auth_clients = yes
+#
+# Note: Enable this option for Outlook up to and including version 2003 and Outlook Express up to version 6. This option does not hurt other clients.
+broken_sasl_auth_clients = no
+
+# Misc. SASL options
+smtpd_sasl_authenticated_header = no
+
+# SMTPD error settings
+smtpd_soft_error_limit = 3
+smtpd_error_sleep_time = 1s
+smtpd_hard_error_limit = 5
+
+# Enable logging of 'permit' actions
+smtpd_log_access_permit_actions = static:all
+
+# SMTP egress
+smtpd_reject_unlisted_sender = yes
+
+# SMTP ingress
+smtpd_reject_unlisted_recipient = yes
+
+# SMTPD ETRN restrictions
+smtpd_discard_ehlo_keywords =
+			ETRN,
+			8BITMIME,
+			DSN
+
+smtpd_etrn_restrictions =
+			permit_mynetworks,
+			reject
+
+# SPF
+policyd-spf_time_limit = 3600
+
+# Use strict RFC821 envelopes
+strict_rfc821_envelopes = yes
+
+# SMTPD restrictions
+smtpd_delay_reject = yes
+
+smtpd_client_restrictions =
+		permit_mynetworks,
+		reject_rbl_client zen.spamhaus.org,
+		reject_unknown_client_hostname
+
+smtpd_helo_required = yes
+smtpd_helo_restrictions =
+		permit_mynetworks,
+		reject_invalid_helo_hostname,
+		reject_non_fqdn_helo_hostname,
+		reject_unknown_helo_hostname
+
+smtpd_sender_custom_restrictions =
+		check_sender_access hash:/etc/postfix/smtpd_map_reject_localhost,
+		check_sender_access regexp:/etc/postfix/smtpd_regex_reject_sender_ip
+
+smtpd_sender_restrictions =
+		permit_mynetworks,
+		reject_non_fqdn_sender,
+		reject_unknown_sender_domain,
+		$smtpd_sender_custom_restrictions
+
+smtpd_recipient_custom_restrictions =
+		check_recipient_access hash:/etc/postfix/smtpd_map_reject_localhost,
+		check_recipient_access hash:/etc/postfix/smtpd_map_reject_root,
+		check_recipient_access regexp:/etc/postfix/smtpd_regex_reject_recipient_ip
+
+smtpd_recipient_restrictions =
+		permit_mynetworks,
+		reject_non_fqdn_recipient,
+		reject_unknown_recipient_domain,
+		$smtpd_recipient_custom_restrictions
+
+smtpd_relay_restrictions =
+		permit_mynetworks,
+		reject_non_fqdn_sender,
+		reject_non_fqdn_recipient,
+		reject_unauth_destination,
+		check_policy_service unix:private/policyd-spf,
+		check_policy_service unix:private/quota-status
+		# check_policy_service unix:private/qsps-proxy
+
+smtpd_data_restrictions =
+		reject_unauth_pipelining,
+		reject_multi_recipient_bounce
+
+
+
+# Various Postfix settings
+
+# Address extensions
+# recipient_delimiter =
+
+# default_database_type = hash
+
+# sendmail_path = /usr/sbin/sendmail
+# newaliases_path = /usr/bin/newaliases
+# mailq_path = /usr/bin/mailq
+# setgid_group = postdrop
+
+# authorized_submit_users = static:anyone
+
+# html_directory = /usr/share/doc/postfix/html
+# manpage_directory = /usr/share/man
+# sample_directory = /etc/postfix
+
+# Set the max message size to 25MB
+message_size_limit = 25000000
+
+# Hide table name when user is not found
+show_user_unknown_table_name = no
+
+# smtpd_delay_open_until_valid_rcpt (default: yes)
+# Postpone the start of an SMTP mail transaction until a valid RCPT TO command is received.
+# Specify "no" to create a mail transaction as soon as the Postfix SMTP server receives a valid MAIL FROM command.
+# With sites that reject lots of mail, the default setting reduces the use of disk, CPU and memory resources.
+# The downside is that rejected recipients are logged with NOQUEUE instead of a mail transaction ID. This complicates the logfile analysis of multi-recipient mail.
+# This feature is available in Postfix 2.3 and later.
+smtpd_delay_open_until_valid_rcpt = no
+
+# By default Postfix-generated mail is not subject to content inspection by non_smtpd_milters, such as the one used
+# to DKIM sign outgoing messages. Therefore, outgoing bounce messages are not DKIM signed.
+# We can change this by using the internal_mail_filter_classes parameter.
+#
+# See:	http://www.postfix.org/MILTER_README.html
+#	https://marc.info/?l=postfix-users&m=155050835114827
+#
+#
+#
+# internal_mail_filter_classes (default: empty)
+# What categories of Postfix-generated mail are subject to before-queue content inspection by non_smtpd_milters, header_checks and body_checks.
+# Specify zero or more of the following, separated by whitespace or comma.
+#	bounce - Inspect the content of delivery status notifications.
+#	notify - Inspect the content of postmaster notifications by the smtp(8) and smtpd(8) processes.
+#
+# NOTE: It's generally not safe to enable content inspection of Postfix-generated email messages. The user is warned.
+# This feature is available in Postfix 2.3 and later.
+internal_mail_filter_classes = bounce
+
+# smtputf8_enable (default: yes)
+# Enable preliminary SMTPUTF8 support for the protocols described in RFC 6531..6533.
+# This requires that Postfix is built to support these protocols.
+# This feature is available in Postfix 3.0 and later.
+smtputf8_enable = no
+
+
+
+# Enable TLS; When we are the SMTP client - outgoing
+smtp_tls_security_level=may
+smtp_tls_loglevel = 1
+
+# Enable TLS; When we are the SMTP server - incoming; Use the Mozilla TLS Guidelines
+#
+# Mozilla TLS Guidelines - Modern
+# generated 2021-05-14, Mozilla Guideline v5.6, Postfix 3.4.13, OpenSSL 1.1.1f, modern configuration
+# https://ssl-config.mozilla.org/#server=postfix&version=3.4.13&config=modern&openssl=1.1.1f&guideline=5.6
+# smtpd_tls_security_level = may
+# smtpd_tls_loglevel = 1
+# smtpd_tls_auth_only = yes
+# smtpd_tls_cert_file = /etc/ssl/certs/local/fullchain.pem
+# smtpd_tls_key_file = /etc/ssl/private/local/key.pem
+# smtpd_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1, !TLSv1.2
+# smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1, !TLSv1.2
+
+# tls_preempt_cipherlist = no
+
+# Enable TLS; When we are the SMTP server - incoming; Use the Mozilla TLS Guidelines
+#
+# Mozilla TLS Guidelines - Intermediate
+# generated 2021-05-14, Mozilla Guideline v5.6, Postfix 3.4.13, OpenSSL 1.1.1f, intermediate configuration
+# https://ssl-config.mozilla.org/#server=postfix&version=3.4.13&config=intermediate&openssl=1.1.1f&guideline=5.6
+#
+smtpd_tls_security_level = may
+smtpd_tls_loglevel = 1
+smtpd_tls_auth_only = yes
+smtpd_tls_cert_file = /etc/ssl/certs/local/fullchain.pem
+smtpd_tls_key_file = /etc/ssl/private/local/key.pem
+smtpd_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+smtpd_tls_mandatory_ciphers = medium
+#
+# curl https://ssl-config.mozilla.org/ffdhe2048.txt > /path/to/dhparam
+# not actually 1024 bits, this applies to all DHE >= 1024 bits
+smtpd_tls_dh1024_param_file = /etc/postfix/dh2048.pem
+#
+tls_medium_cipherlist = ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384
+tls_preempt_cipherlist = no
+
+# NOTES:
+#
+# smtpd_tls_dh1024_param_file (default: empty)
+# File with DH parameters that the Postfix SMTP server should use with non-export EDH ciphers.
+# The best-practice choice of parameters uses a 2048-bit prime. This is fine, despite the historical "1024" in the parameter name. 
+# Do not be tempted to use much larger values, performance degrades quickly, and you may also cease to interoperate with some mainstream SMTP clients. 
+# As of Postfix 3.1, the compiled-in default prime is 2048-bits, and it is not strictly necessary, though perhaps somewhat beneficial to generate custom DH parameters.
+#
+# Instead of using the exact same parameter sets as distributed with other TLS packages, it is more secure to generate your own set of parameters with something like the following commands:
+#
+#	openssl dhparam -out /etc/postfix/dh2048.pem 2048
+#	openssl dhparam -out /etc/postfix/dh1024.pem 1024
+#	# As of Postfix 3.6, export-grade 512-bit DH parameters are no longer supported or needed.
+#	openssl dhparam -out /etc/postfix/dh512.pem 512
+#
+# It is safe to share the same DH parameters between multiple Postfix instances. If you prefer, you can generate separate parameters for each instance.
+# If you want to take maximal advantage of ciphers that offer forward secrecy see the Getting started section of FORWARD_SECRECY_README. 
+# The full document conveniently presents all information about Postfix "perfect" forward secrecy support in one place: what forward secrecy is, how to tweak settings,
+# and what you can expect to see when Postfix uses ciphers with forward secrecy.
+#
+#	Example:
+#	smtpd_tls_dh1024_param_file = /etc/postfix/dh2048.pem
+#
+# This feature is available with Postfix version 2.2.
+
+
+
+# Setup milters like OpenDKIM and SpamAssassin.
+milter_protocol = 6
+milter_default_action = accept
+
+# SMTP-only Milter applications handle mail that arrives via the Postfix smtpd(8) server.
+# For incoming mail, OpenDKIM should be present early in the chain before other milters have a chance to change the headers
+smtpd_milters = inet:localhost:54321, unix:spamass/spamass.sock
+milter_mail_macros = i {auth_type} {auth_authen} {auth_author} {mail_addr} {mail_host} {mail_mailer}
+
+# Non-SMTP Milter applications handle mail that arrives via the Postfix sendmail(1) command-line or via the Postfix qmqpd(8) server.
+# We should sign locally submitted mail, but we do not check it for spam.
+non_smtpd_milters = inet:localhost:54321
+
+
+
+header_checks = pcre:/etc/postfix/smtpd_pcre_header_checks

@@ -1,0 +1,390 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Copyright (c) Attila Kovari
+# All rights reserved.
+#
+# MIT License
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ------------------------------------------------------------------------------
+
+
+
+source ./utils
+CONFIGFILE=./postnimda.cf
+
+CURRENT_USER=$(id -u)
+CURRENT_USER_NAME=$(id -un ${CURRENT_USER})
+
+# VIRTUAL_DOMAINS_HOME
+# POSTFIX_VIRTUAL_DOMAINS_FILE
+# POSTFIX_VIRTUAL_DOMAINS_UID_FILE
+# POSTFIX_VIRTUAL_DOMAINS_GID_FILE
+# POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE
+# POSTFIX_VIRTUAL_ALIAS_MAPS_FILE
+# DOVECOT_USERDB_FILE
+# DOVECOT_PASSDB_FILE
+# DOVECOT_PASSDB_SCHEME
+# DOVECOT_PASSDB_DENY_FILE
+
+[[ $CURRENT_USER -eq 0 ]] || {
+	error "Sorry ${CURRENT_USER_NAME}, but I must be run as root!"
+	exit 1
+}
+echo
+
+info "Checking if 'postconf' is available."
+postconf=$(command -v postconf)
+[[ -x ${postconf} ]] || {
+	error "'postconf' required but not installed."
+	exit 1
+}
+info "'postconf' found at $postconf"
+echo
+
+info "Checking if 'postmap' is available."
+postmap=$(command -v postmap)
+[[ -x ${postmap} ]] || {
+	error "'postmap' required but not installed."
+	exit 1
+}
+info "'postmap' found at $postmap"
+echo
+
+info "Checking if 'doveconf' is available."
+doveconf=$(command -v doveconf)
+[[ -x ${doveconf} ]] || {
+	error "'doveconf' required but not installed."
+	exit 1
+}
+info "'doveconf' found at $doveconf"
+echo
+
+
+
+########## Checking postconf parameters
+##########
+info "Checking configuration file for 'virtual_mailbox_domains'."
+virtual_mailbox_domains=$(echo $(postconf -xh virtual_mailbox_domains) | cut -s -f2 -d ":")
+info "Found value: ${virtual_mailbox_domains}"
+
+sanity_check "${virtual_mailbox_domains}"
+[[ $? -eq 0 ]] || {
+	error "'virtual_mailbox_domains' is not set or it is invalid!"
+	exit 1
+}
+
+[[ -f ${virtual_mailbox_domains} ]] || {
+	error "File ${virtual_mailbox_domains} specified by the 'virtual_mailbox_domains' parameter does not exist!"
+	# continue_check
+	echo
+	exit 1
+}
+
+info "Checking configuration file for 'virtual_uid_maps'."
+virtual_uid_maps=$(echo $(postconf -xh virtual_uid_maps) | cut -s -f2 -d ":")
+info "Found value: ${virtual_uid_maps}"
+
+sanity_check "${virtual_uid_maps}"
+[[ $? -eq 0 ]] || {
+	error "'virtual_uid_maps' is not set or it is invalid!"
+	exit 1
+}
+
+[[ -f ${virtual_uid_maps} ]] || {
+	error "File ${virtual_uid_maps} specified by the 'virtual_uid_maps' parameter does not exist!"
+	# continue_check
+	echo
+	exit 1
+}
+
+info "Checking configuration file for 'virtual_gid_maps'."
+virtual_gid_maps=$(echo $(postconf -xh virtual_gid_maps) | cut -s -f2 -d ":")
+info "Found value: ${virtual_gid_maps}"
+
+sanity_check "${virtual_gid_maps}"
+[[ $? -eq 0 ]] || {
+	error "'virtual_gid_maps' is not set or it is invalid!"
+	exit 1
+}
+
+[[ -f ${virtual_gid_maps} ]] || {
+	error "File ${virtual_gid_maps} specified by the 'virtual_gid_maps' parameter does not exist!"
+	# continue_check
+	echo
+	exit 1
+}
+
+info "Checking configuration file for 'virtual_mailbox_maps'."
+virtual_mailbox_maps=$(echo $(postconf -xh virtual_mailbox_maps) | cut -s -f2 -d ":")
+info "Found value: ${virtual_mailbox_maps}"
+
+sanity_check "${virtual_mailbox_maps}"
+[[ $? -eq 0 ]] || {
+	error "'virtual_mailbox_maps' is not set or it is invalid!"
+	exit 1
+}
+
+[[ -f ${virtual_mailbox_maps} ]] || {
+	error "File ${virtual_mailbox_maps} specified by the 'virtual_mailbox_maps' parameter does not exist!"
+	# continue_check
+	echo
+	exit 1
+}
+
+info "Checking configuration file for 'virtual_alias_maps'."
+virtual_alias_maps=$(echo $(postconf -xh virtual_alias_maps) | cut -s -f2 -d ":")
+info "Found value: ${virtual_alias_maps}"
+
+sanity_check "${virtual_alias_maps}"
+[[ $? -eq 0 ]] || {
+	error "'virtual_alias_maps' is not set or it is invalid!"
+	exit 1
+}
+
+[[ -f ${virtual_alias_maps} ]] || {
+	error "File ${virtual_alias_maps} specified by the 'virtual_alias_maps' parameter does not exist!"
+	# continue_check
+	echo
+	exit 1
+}
+
+
+
+########## Checking doveconf parameters
+##########
+info "Checking Dovecot's userdb."
+dovecot_userdb=""
+
+# get the userdb file
+if [[ ! -z $(doveconf -S "userdb") ]]; then
+
+	data=$(doveconf -S | grep "userdb=" | cut -f2 -s -d "=")
+	readarray -t -d " " arr <<< "${data}"
+
+	for i in ${arr[@]}; do
+		userdb_driver=$(doveconf -xS "userdb/${i}/driver")
+		userdb_args=$(doveconf -xS "userdb/${i}/args")
+
+		# userdb is a passwd-file
+		if [[ $(echo ${userdb_driver} | cut -f2 -s -d "=") == "passwd-file" ]]; then
+			# get the deny file
+			dovecot_userdb=$(echo ${userdb_args} | cut -f2 -s -d " ")
+		fi
+		[[ -z ${dovecot_userdb} ]] || break
+	done
+fi
+info "Found value: ${dovecot_userdb}"
+
+sanity_check "${dovecot_userdb}"
+[[ $? -eq 0 ]] || {
+	error "'userdb' is not set or invalid!"
+	exit 1
+}
+
+[[ -f ${dovecot_userdb} ]] || {
+	error "File ${dovecot_userdb} specified by the 'userdb' parameter does not exist!"
+	# continue_check
+	echo
+	exit 1
+}
+
+info "Checking Dovecot's passdb and passdb-deny."
+note "The section referred to as 'passdb-deny' is NOT a standard Dovecot configuration section."
+note "It is just a regular 'passdb' section with the 'deny' property set to 'yes'."
+
+dovecot_passdb=""
+dovecot_passdb_scheme=""
+dovecot_passdb_deny=""
+
+# get the passdb-deny and passdb file
+if [[ ! -z $(doveconf -S "passdb") ]]; then
+
+	indexes=$(doveconf -S | grep "passdb=" | cut -f2 -s -d "=")
+	readarray -t -d " " arr <<< "${indexes}"
+
+	for i in ${arr[@]}; do
+		passdb_deny=$(doveconf -xS "passdb/${i}/deny")
+		passdb_driver=$(doveconf -xS "passdb/${i}/driver")
+		passdb_args=$(doveconf -xS "passdb/${i}/args")
+
+		if [[ $(echo ${passdb_driver} | cut -f2 -s -d "=") == "passwd-file" ]]; then
+
+			# passdb is a passwd-file
+			if [[ $(echo ${passdb_deny} | cut -f2 -s -d "=") == "yes" ]]; then
+
+				# passdb-deny; not yet set; args match "args=/file/path"
+				[[ -z ${dovecot_passdb_deny} && $(echo ${passdb_args} |  grep "args=/") ]] && {
+					# get the passdb deny file
+					dovecot_passdb_deny=$( echo ${passdb_args} | cut -f2 -s -d "=")
+				}
+			else
+				# passdb; not yet set; args match "args=scheme="
+				[[ -z ${dovecot_passdb} && $(echo ${passdb_args} |  grep "args=scheme=") ]] && {
+					# get the passdb file
+					dovecot_passdb=$( echo ${passdb_args} | cut -f3 -s -d " ")
+					dovecot_passdb_scheme=$(echo ${passdb_args} | cut -f3 -s -d "=" | cut -f1 -s -d " ")
+				}
+			fi
+		fi
+		[[ ! -z ${dovecot_passdb_deny} && ! -z ${dovecot_passdb} ]] && break
+	done
+fi
+info "Found value: ${dovecot_passdb}"
+
+sanity_check "${dovecot_passdb}"
+[[ $? -eq 0 ]] || {
+	error "'passdb' is not set or invalid!"
+	exit 1
+}
+
+[[ -f ${dovecot_passdb} ]] || {
+	error "File ${dovecot_passdb} specified by the 'passdb' parameter does not exist!"
+	# continue_check
+	echo
+	exit 1
+}
+
+[[ ! -z ${dovecot_passdb_scheme} ]] || {
+	error "Default password encryption scheme is not set."
+	exit 1
+}
+
+# passdb-deny is not mandatory but if present the file should exist
+if [[ ! -z ${dovecot_passdb_deny} ]]; then
+	info "Found value: ${dovecot_passdb_deny}"
+
+	sanity_check "${dovecot_passdb_deny}"
+	[[ $? -eq 0 ]] || {
+		error "'passdb-deny' is not set or invalid!"
+		exit 1
+	}
+
+	[[ -f ${dovecot_passdb_deny} ]] || {
+		error "File ${dovecot_passdb_deny} specified by the 'passdb-deny' section does not exist!"
+		# continue_check
+		echo
+		exit 1
+	}
+fi
+
+########## Checking home directory for the hosted domains
+##########
+info "Checking configuration file for 'virtual_mailbox_base'."
+virtual_mailbox_base=$(postconf -xh virtual_mailbox_base)
+info "Found value: ${virtual_mailbox_base}"
+
+sanity_check "${virtual_mailbox_base}"
+[[ $? -eq 0 ]] || {
+	error "'virtual_mailbox_base' is not set or it is invalid!"
+	exit 1
+}
+
+info "Home directory for the hosted domains is set to ${virtual_mailbox_base}"
+
+
+
+########## Adding home directory for the hosted domains
+##########
+virtual_domains_home="${virtual_mailbox_base}"
+info "Attempting to create home directory for the hosted domains."
+
+if [[ -e ${virtual_domains_home} ]]; then
+	if [[ ! -d ${virtual_domains_home} ]]; then
+		error "${virtual_domains_home} already exists but it is not a directory!"
+		exit 1
+	fi
+	warning "${virtual_domains_home} already exists!"
+fi
+
+if [[ ! -d ${virtual_domains_home} ]]; then
+	info "Creating home directory ${virtual_domains_home}"
+
+	mkdir "${virtual_domains_home}" > /dev/null 2>&1
+	[ $? -eq 0 ] || {
+		error "Failed to create home directory!"
+		exit 1
+	}
+	info "Created."
+
+	info "Setting permissions for ${virtual_domains_home}"
+	chmod 755 "${virtual_domains_home}"
+	info "Done."
+
+	echo
+
+	# -----------------------------------------------------------------------------
+	# Add a dedicated random user that will own the home directory instead of root.
+	# This may change in the future!
+	info "Creating new owner for ${virtual_domains_home}"
+
+	generic_owner="vu$(openssl rand -hex 3)"
+	adduser --no-create-home --disabled-login --shell /usr/sbin/nologin --gecos "Hosted domains home directory owner" $generic_owner
+	[[ $? -eq 0 ]] || {
+		error "Failed to add the '${generic_owner}' user!"
+		exit 1
+	}
+
+	generic_owner_id=$(id -u ${generic_owner})
+	generic_group_id=$(id -g ${generic_owner})
+
+	chown ${generic_owner_id}:${generic_group_id} "${virtual_domains_home}"
+	info "Done."
+	echo
+	# -----------------------------------------------------------------------------
+
+else
+	info "Not created. Directory ${virtual_domains_home} already exists!"
+	echo
+fi
+
+
+
+########## Saving confiuration
+##########
+info "Saving settings."
+[[ ! -f ${CONFIGFILE} ]] || {
+	warning "All existing $(basename ${CONFIGFILE}) settings will be overwritten!"
+	# continue_check
+	echo
+}
+echo -n "" > ${CONFIGFILE}
+chmod 600 ${CONFIGFILE}
+
+# if we made it so far, save everything to the config file
+echo "VIRTUAL_DOMAINS_HOME=${virtual_domains_home}" >> ${CONFIGFILE}
+
+echo "POSTFIX_VIRTUAL_DOMAINS_FILE=${virtual_mailbox_domains}" >> ${CONFIGFILE}
+echo "POSTFIX_VIRTUAL_DOMAINS_UID_FILE=${virtual_uid_maps}" >> ${CONFIGFILE}
+echo "POSTFIX_VIRTUAL_DOMAINS_GID_FILE=${virtual_gid_maps}" >> ${CONFIGFILE}
+echo "POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE=${virtual_mailbox_maps}" >> ${CONFIGFILE}
+echo "POSTFIX_VIRTUAL_ALIAS_MAPS_FILE=${virtual_alias_maps}" >> ${CONFIGFILE}
+
+echo "DOVECOT_USERDB_FILE=${dovecot_userdb}" >> ${CONFIGFILE}
+echo "DOVECOT_PASSDB_FILE=${dovecot_passdb}" >> ${CONFIGFILE}
+echo "DOVECOT_PASSDB_SCHEME=${dovecot_passdb_scheme}" >> ${CONFIGFILE}
+echo "DOVECOT_PASSDB_DENY_FILE=${dovecot_passdb_deny}" >> ${CONFIGFILE}
+
+info "Done."
+echo
+
+
+
+exit 0

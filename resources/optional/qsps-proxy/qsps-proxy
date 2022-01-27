@@ -1,0 +1,335 @@
+#!/usr/bin/python3
+
+'''
+Copyright (c) Attila Kovari
+All rights reserved.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+
+License note:
+The input processing loop was borrowed from spf_engine/policyd_spf.py
+and it is licensed under the Apache License, Version 2.0. You may obtain
+a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+'''
+
+
+
+import configparser
+import os
+import re
+import shlex
+import socket
+import subprocess
+import sys
+
+from typing import List
+from shutil import which
+
+import syslog
+syslog.openlog(os.path.basename(sys.argv[0]), syslog.LOG_PID, syslog.LOG_MAIL)
+
+
+
+def main():
+
+    global config
+    config = getConfig()
+
+    host = config.get('quotaServiceHost','localhost')
+    port = int(config.get('quotaServicePort', 54325))
+
+    syspath = '/usr/sbin'
+
+    postconf = which('postconf', path=syspath)
+    if postconf is None:
+        syslog.syslog('ERROR: postconf required but not found')
+        sys.exit(1)
+
+    postmap = which('postmap', path=syspath)
+    if postmap is None:
+        syslog.syslog('ERROR: postmap required but not found')
+        sys.exit(1)
+
+    if config.get('debugLevel') >= 1:
+        syslog.syslog('Quota status proxy started')
+
+    virtualAliasMaps, err, rcode = external(postconf, ['-xh', 'virtual_alias_maps'])
+    if not virtualAliasMaps or err:
+        syslog.syslog('ERROR: Could not find virtual alias maps')
+        # Pass the request data to Dovecot without any alias lookup.
+        # If everything is properly configured this should never happen.
+        # Since Dovecot has no knowledge of the alias, it will give the OK
+        # for the recipient even if the real mailbox where the alias
+        # points to is overquota. This will most likely lead to a bounce
+        # message being sent out which will probably expose the email address
+        # of the real mailbox.
+        # Make sure everything is properly configured.
+        virtualAliasMaps = None
+
+        # Exiting will cause Postfix to temporarily reject the message with:
+        # 451 4.3.5 Recipient address rejected: Server configuration problem
+        # This behaviour can be changed by setting a different value for the
+        # smtpd_policy_service_default_action Postfix configuration parameter.
+        #
+        # sys.exit(rcode)
+    else:
+        if config.get('debugLevel') >= 2:
+            syslog.syslog('Found virtual alias maps: "%s"' % virtualAliasMaps)
+
+    # Connect to Dovecot's quota-status access policy service
+    sock = quotaServiceConnect(host, port)
+    if not sock:
+        syslog.syslog('ERROR: Connection to query-status policy server failed')
+        sys.exit(1)
+
+    data = {}
+    lineRx = re.compile(r'^\s*([^=\s]+)\s*=(.*)$')
+
+    while True:
+        lineraw = sys.stdin.buffer.readline()
+        line = lineraw.decode('utf-8', errors='replace')
+
+        if not line: break
+        line = line.rstrip()
+
+        if config.get('debugLevel') >= 3:
+            syslog.syslog('Read line: "%s"' % line)
+
+        if not line:
+            if config.get('debugLevel') >= 2:
+                syslog.syslog('Found new entry')
+
+            if data.get('protocol_state') == 'RCPT':
+                if (data.get('recipient') is not None) and (data.get('recipient') != ''):
+                    # Do not trust user provided input.
+                    data['recipient'] = shlex.quote(data['recipient'])
+
+                    if config.get('debugLevel') >= 2:
+                        syslog.syslog('Provided recipient: "%s"' % data['recipient'])
+                    data['recipient'] = expand(postmap, virtualAliasMaps, data['recipient'])
+                    if config.get('debugLevel') >= 2:
+                        syslog.syslog('Expanded recipient: "%s"' % data['recipient'])
+
+                    # Query Dovecot's quota-status access policy service
+                    response = quotaServiceQuery(sock, data)
+                    # Relay back the response to Postfix
+                    sys.stdout.write(response)
+                else:
+                    # If no recipient provided (not set or empty)
+                    sys.stdout.write('action=DUNNO\n\n')
+
+            else:
+                # If protocol state is not RCPT
+                sys.stdout.write('action=DUNNO\n\n')
+
+            sys.stdout.flush()
+            data = {}
+            continue
+
+        m = lineRx.match(line)
+        if not m:
+            syslog.syslog('ERROR: Could not match line "%s"' % line)
+            continue
+
+        key = m.group(1)
+        value = m.group(2)
+        if key not in ['protocol_state', 'protocol_name', 'queue_id']:
+            value = value.lower()
+        data[key] = value
+
+    quotaServiceDisconnect(sock)
+
+    if config.get('debugLevel') >= 1:
+        syslog.syslog('Normal exit')
+
+
+
+def external(command: str, args: List[str]):
+    '''
+    Execute an external command.
+    This is used to call Postfix's postconf and postmap tools
+    '''
+    cmd = [command]
+    cmd.extend(args)
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               encoding='utf-8', shell=False)
+    out, err = process.communicate(timeout=5)
+    rcode = process.returncode
+
+    return out.rstrip(), err.rstrip(), rcode
+
+
+
+def splitTakeFirst(input: str):
+    result = re.split('[,| ]', input)
+    return result[0].strip()
+
+
+
+def expand(postmap, virtualAliasMaps, alias):
+    '''
+    Expand an alias into a real mailbox.
+    Note that an alias can also point to another alias.
+    Using postmap query virtualAliasMaps for alias.
+    '''
+    # Cases covered:
+    # - alias does not exist
+    # - or this is a real mailbox with no aliases pointing to it
+    # - or this is a non-existing recipient
+    #
+    # If one lookup call returns multiple addresses,
+    # only the first one is considered.
+    #
+    # If recipient is a non-existing recipient,
+    # Postfix should reject it.
+
+    # If no alias maps found, do not stop the party
+    # and pass the unchanged recipient to Dovecot's quota-status
+    if not virtualAliasMaps: return alias
+
+    args = ['-q', alias, virtualAliasMaps]
+    if config.get('debugLevel') >= 2:
+        syslog.syslog('Postmap call: "%s"' % str(args))
+
+    result, err, rcode = external(postmap, args)
+    result = splitTakeFirst(result)
+
+    # If lookup failed for whatever reason, including an error,
+    # don't stop the party and pass the unchanged recipient to
+    # Dovecot's quota-status.
+    # Note that this also covers the case when you query the db
+    # with a real mailbox as recipient.
+    if rcode != 0: return alias
+
+    expandedalias = alias
+    if result:
+        rcode = 0
+        realMailbox = None
+
+        # In case the alias points to another alias
+        while result and rcode == 0:
+            if result:
+                realMailbox = result
+
+            args = ['-q', result, virtualAliasMaps]
+            if config.get('debugLevel') >= 2:
+                syslog.syslog('Postmap call: "%s"' % str(args))
+
+            result, err, rcode = external(postmap, args)
+            result = splitTakeFirst(result)
+
+            if realMailbox:
+                expandedalias = realMailbox
+
+    # Return the expanded alias, or the unchanged input if no
+    # expansion was done
+    return expandedalias
+
+
+
+def quotaServiceConnect(host, port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    socketAddress = (host, port)
+
+    try:
+        sock.connect(socketAddress)
+    except socket.error as ex:
+        syslog.syslog("Socket exception: %s" % ex)
+        return None
+
+    return sock
+
+
+
+def quotaServiceDisconnect(sock):
+    try:
+        sock.close()
+    except:
+        pass
+
+
+
+def quotaServiceQuery(sock, data):
+    '''
+    Query the quota-status access policy service
+    and return the answer.
+    '''
+    query = ''
+
+    for key, value in data.items():
+        query += key + '=' + value + '\n'
+    query += '\n'
+
+    if config.get('debugLevel') >= 2:
+        syslog.syslog('Quota query: "%s"' % query)
+
+    sock.sendall(bytes(query, 'utf-8'))
+    response = sock.recv(4096).decode('utf-8')
+
+    if config.get('debugLevel') >= 1:
+        syslog.syslog('Quota response: "%s"' % response)
+
+    return response
+
+
+
+def getConfig():
+    '''
+    Load the configuration from: /etc/qsps-proxy.conf
+    Not much error handling is done here,
+    so make sure the config file is properly set up.
+    '''
+    configFile = '/etc/qsps-proxy.conf'
+
+    if not os.path.isfile(configFile):
+        syslog.syslog('ERROR: Configuration file not found')
+        sys.exit(1)
+
+    config = configparser.ConfigParser()
+    config.optionxform = str  # do not convert keys to lowercase
+    config.read(configFile)
+
+    # Convert config values based on this field type map
+    fieldTypeMap = {
+        'debugLevel' : int,
+        'quotaServiceHost' : str,
+        'quotaServicePort' : int
+    }
+
+    configData = {}
+    for section in config.sections():
+        for key in config[section]:
+            type = fieldTypeMap.get(key)
+            if type is not None:
+                configData[key] = type(config[section][key])
+
+    if not configData.get('debugLevel'):
+        # Set default debug level if not defined in the config file
+        configData['debugLevel'] = 0
+
+    return configData
+
+
+
+if __name__ == '__main__':
+    main()

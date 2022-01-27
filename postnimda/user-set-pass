@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Copyright (c) Attila Kovari
+# All rights reserved.
+#
+# MIT License
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ------------------------------------------------------------------------------
+
+
+
+source ./utils
+CONFIGFILE=./postnimda.cf
+
+CURRENT_USER=$(id -u)
+CURRENT_USER_NAME=$(id -un ${CURRENT_USER})
+
+virtual_user=$1
+
+DOVECOT_PASSDB_FILE=""
+DOVECOT_PASSDB_SCHEME=""
+
+
+
+[[ ${CURRENT_USER} -eq 0 ]] || {
+        error "Sorry ${CURRENT_USER_NAME}, but I must be run as root!"
+        exit 1
+}
+
+[[ -f ${CONFIGFILE} ]] || {
+        error "Config file does not exist! Please run setup first."
+        exit 1
+}
+
+[[ ! -z ${virtual_user} ]] || {
+	echo "Usage $0 <user@domain>"
+	exit 1
+}
+
+
+
+##### Read configuration from file
+#####
+source ${CONFIGFILE}
+
+sanity_check "${DOVECOT_PASSDB_FILE}"
+[[ $? -eq 0 ]] || {
+  error "'DOVECOT_PASSDB_FILE' is not set or invalid!"
+  exit 1
+}
+
+[[ ! -z ${DOVECOT_PASSDB_SCHEME} ]] || {
+	error "Default password encryption scheme is not set."
+	exit 1
+}
+
+
+
+##### Set a password for the specified user
+#####
+info "Setting password for ${virtual_user}"
+
+# prompting for the old password.
+# at some point we could also properly check if the old password is correct.
+# for now we rely on the fact that the password change for the userkey will fail if the old password is not correct.
+password_old=$(whiptail --passwordbox "Enter old password:" 8 78 --title "${virtual_user}" 3>&1 1>&2 2>&3)
+[[ ! -z ${password_old} ]] || {
+	echo "Old password can not be empty"
+	exit 1
+}
+
+password=""
+while : ; do
+	password=$(whiptail --passwordbox "Enter new password:" 8 78 --title "${virtual_user}" 3>&1 1>&2 2>&3)
+	[[ $? -eq 0 ]] || {
+		warning "Operation cancelled"
+		exit 1
+	}
+	password_repeat=$(whiptail --passwordbox "Re-type password:" 8 78 --title "${virtual_user}" 3>&1 1>&2 2>&3)
+
+	# passwords must match and have a length > 0
+	if [[ ${password} != ${password_repeat} || ${#password} -lt 1 ]]; then
+		whiptail --msgbox --title "Password issue" "Mismatched or invalid passwords! Please try again." 0 0
+	else
+		break
+	fi
+done
+
+# should not be empty but let's check it anyway
+if [[ ! -z ${password} ]]; then
+	# setting new password for the userkey
+	password_old_hash=$(echo -n "${virtual_user}${password_old}" | sha256sum | tr -d "[:space:]-")
+	password_new_hash=$(echo -n "${virtual_user}${password}" | sha256sum | tr -d "[:space:]-")
+
+	# avoid password being shown in the output of PS, TOP, etc ...
+	doveadm mailbox cryptokey password -u "${virtual_user}" -N -O dummy \
+<<EOF
+${password_old_hash}
+${password_new_hash}
+EOF
+	[[ $? -eq 0 ]] || {
+		error "Failed setting new userkey password. Make sure that the specified old password is correct."
+		exit 1
+	}
+
+	# setting new password for the user in passdb
+	# avoid password being shown in the output of PS, TOP, etc ...
+	virtual_pass=$(echo "${password}" | sed p | doveadm pw -s ${DOVECOT_PASSDB_SCHEME} -u ${virtual_user})
+
+	# process the passdb file and save the result
+	$(awk -i inplace -v inplace::suffix=.bak -F ':' -v user="${virtual_user}" -v pass="${virtual_pass}" \
+		'BEGIN { OFS=":" } $1 == user { $2 = pass } { print }' ${DOVECOT_PASSDB_FILE})
+
+	# kick user and force re-login with the new password
+	doveadm kick "${virtual_user}"
+else
+	error "Empty password provided."
+	exit 1
+fi
+
+info "Done."
+echo
+
+
+
+exit 0

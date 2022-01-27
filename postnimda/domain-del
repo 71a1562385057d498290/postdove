@@ -1,0 +1,307 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Copyright (c) Attila Kovari
+# All rights reserved.
+#
+# MIT License
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ------------------------------------------------------------------------------
+
+
+
+source ./utils
+CONFIGFILE=./postnimda.cf
+USERNAME_PREFIX="vdu"
+
+CURRENT_USER=$(id -u)
+CURRENT_USER_NAME=$(id -un ${CURRENT_USER})
+
+domain_name=$1
+
+VIRTUAL_DOMAINS_HOME=""
+POSTFIX_VIRTUAL_DOMAINS_FILE=""
+POSTFIX_VIRTUAL_DOMAINS_UID_FILE=""
+POSTFIX_VIRTUAL_DOMAINS_GID_FILE=""
+POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE=""
+DOVECOT_USERDB_FILE=""
+DOVECOT_PASSDB_FILE=""
+
+# Location of system configuration files
+readonly sysconfdir="/etc"
+
+
+
+[[ ${CURRENT_USER} -eq 0 ]] || {
+	error "Sorry ${CURRENT_USER_NAME}, but I must be run as root!"
+	exit 1
+}
+
+[[ $# -eq 1 ]] || {
+	# more than one arguments provided
+	error "Invalid number of arguments. Please provide one single domain name."
+	exit 1
+}
+
+[[ -f ${CONFIGFILE} ]] || {
+	error "Postnimda config file does not exist! Please run setup first."
+	exit 1
+}
+
+[[ ! -z ${domain_name} ]] || {
+	# domain not provided
+	echo "Usage: $0 <domain-name>"
+	exit 1
+}
+
+
+
+########## Read configuration from file
+##########
+source ${CONFIGFILE}
+
+sanity_check "${VIRTUAL_DOMAINS_HOME}"
+[[ $? -eq 0 ]] || {
+	error "'VIRTUAL_DOMAINS_HOME' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_UID_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_UID_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_GID_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_GID_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${DOVECOT_USERDB_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'DOVECOT_USERDB_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${DOVECOT_PASSDB_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'DOVECOT_PASSDB_FILE' is not set or invalid!"
+	exit 1
+}
+
+
+
+########## Removing domain from Postfix
+##########
+info "${domain_name}: removing domain from Postfix."
+prompt_yes_no
+if [[ $? -eq 0 ]]; then
+	# check if domain is present in Postfix
+	if [[ $(grep -E "^${domain_name}\s+OK$" ${POSTFIX_VIRTUAL_DOMAINS_FILE}) ]]; then
+
+		result=$(grep -v -E "^${domain_name}\s+OK$" ${POSTFIX_VIRTUAL_DOMAINS_FILE})
+		echo "${result}" > ${POSTFIX_VIRTUAL_DOMAINS_FILE}
+		result=$(grep -v -E "^@${domain_name}\s+[0-9]+$" ${POSTFIX_VIRTUAL_DOMAINS_UID_FILE})
+		echo "${result}" > ${POSTFIX_VIRTUAL_DOMAINS_UID_FILE}
+		result=$(grep -v -E "^@${domain_name}\s+[0-9]+$" ${POSTFIX_VIRTUAL_DOMAINS_GID_FILE})
+		echo "${result}" > ${POSTFIX_VIRTUAL_DOMAINS_GID_FILE}
+		info "Virtual domain '${domain_name}' was deleted!"
+
+		info "Rebuilding Postfix maps."
+
+		[[ -z "$(postmap ${POSTFIX_VIRTUAL_DOMAINS_FILE} 2>&1)" ]] || {
+			error "Failed to rebuild map for ${POSTFIX_VIRTUAL_DOMAINS_FILE}."
+			exit 1
+		}
+
+		[[ -z "$(postmap ${POSTFIX_VIRTUAL_DOMAINS_UID_FILE} 2>&1)" ]] || {
+			error "Failed to rebuild map for ${POSTFIX_VIRTUAL_DOMAINS_UID_FILE}."
+			exit 1
+		}
+
+		[[ -z "$(postmap ${POSTFIX_VIRTUAL_DOMAINS_GID_FILE} 2>&1)" ]] || {
+			error "Failed to rebuild map for ${POSTFIX_VIRTUAL_DOMAINS_GID_FILE}."
+			exit 1
+		}
+
+		info "Postfix maps re-built."
+	else
+		info "Domain not found in Postfix."
+	fi
+else
+	info "Domain '${domain_name}' was not removed!"
+fi
+echo
+
+
+
+########## Removing mailboxes from Postfix
+##########
+info "${domain_name}: removing mailboxes from Postfix."
+prompt_yes_no
+if [[ $? -eq 0 ]]; then
+	# check if there are mailboxes for this domain in Postfix, including a catch-all one
+	if [[ $(grep -E "^.*@${domain_name}\s+${domain_name}.+/$" ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}) ]]; then
+
+		# assuming one entry per line
+		# assuming entries have the following form: 'user@domain %d/%u/Maildir/'
+		result=$(grep -v -E "^.+@${domain_name}\s+${domain_name}.+/$" ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE})
+		echo "${result}" > ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}
+		info "Mailboxes for '${domain_name}' were removed from Postfix!"
+
+		info "Rebuilding Postfix maps."
+
+		[[ -z "$(postmap ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE} 2>&1)" ]] || {
+			error "Failed to rebuild map for ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}."
+			exit 1
+		}
+
+		info "Postfix maps re-built."
+	else
+		info "No mailbox found in Postfix for domain ${domain_name}."
+	fi
+else
+	info "Mailboxes for '${domain_name}' were not removed!"
+fi
+echo
+
+
+
+########## Removing mailbox users from Dovecot
+##########
+info "${domain_name}: removing mailbox users from Dovecot."
+prompt_yes_no
+if [[ $? -eq 0 ]]; then
+	if [[ $(grep -E "^.+@${domain_name}:.+$" ${DOVECOT_PASSDB_FILE}) ]]; then
+		# remove user from passdb; assuming one entry per line
+		result=$(grep -v -E "^.+@${domain_name}:.+$" ${DOVECOT_PASSDB_FILE})
+		echo "${result}" > ${DOVECOT_PASSDB_FILE}
+
+		# remove user from userdb too if passdb and userdb files are not the same
+		if [[ ${DOVECOT_USERDB_FILE} != ${DOVECOT_PASSDB_FILE} ]]; then
+			result=$(grep -v -E "^.+@${domain_name}:.+$" ${DOVECOT_USERDB_FILE})
+			echo "${result}" > ${DOVECOT_USERDB_FILE}
+		fi
+		info "Mailbox users for '${domain_name}' were removed from Dovecot!"
+	else
+		info "No mailbox found in Dovecot for domain ${domain_name}."
+	fi
+else
+	info "Mailbox users for '${domain_name}' were not removed!"
+fi
+echo
+
+
+
+########## Deleting domain directory from the local file system
+########## This will also remove the local user and group associated with the domain
+##########
+domain_home="${VIRTUAL_DOMAINS_HOME}/${domain_name}"
+
+info "${domain_name}: deleting domain directory from the local filesystem."
+warning "The domain directory and all of its content will be permanently deleted from the filesystem!"
+warning "Directory to be deleted: ${domain_home}"
+warning "This will also delete the local Unix user and group associated with ${domain_name}"
+
+continue_check
+
+# Kick domain users before removing the domain directory
+if [[ -x $(command -v doveadm) ]]; then
+	doveadm kick "*@${domain_name}"
+fi
+
+if [[ -d ${domain_home} ]]; then
+	# get user and group before the directory is deleted
+	domain_group=$(stat -c "%G" "${domain_home}")
+	domain_owner=$(stat -c "%U" "${domain_home}")
+
+	rm -r "${domain_home}"
+	[[ $? -eq 0 ]] || {
+		error "Failed to delete directory ${domain_home}."
+	       	exit 1
+	}
+
+	info "Directory for '${domain_name}' was deleted!"
+
+	# Do some extra checks before deleting local users and gropus.
+	# If the user/group of the directory was already deleted our call to 'stat' will return 'UNKNOWN'.
+	# This, combined with other actions, could lead to unexpected behaviors!
+
+	if [[ $(echo ${domain_owner} | grep -E "^${USERNAME_PREFIX}.+$") ]]; then
+		# deleting the domain directory local user and group
+		grep "USERGROUPS_ENAB yes" /etc/login.defs 1>/dev/null 2>&1
+		if [[ $? -eq 0 ]]; then
+			# group is automatically deleted
+			deluser ${domain_owner}
+		else
+			# group is not automatically deleted when user is deleted
+			deluser ${domain_owner} && delgroup ${domain_group}
+		fi
+		info "User ${domain_owner} and group ${domain_group} were deleted."
+	fi
+else
+	warning "Directory ${domain_home} does not exist on the local filesystem."
+fi
+echo
+
+
+
+# Assuming SigningTable and KeyTable are located at:
+#       ${sysconfdir}/opendkim/SigningTable
+#       ${sysconfdir}/opendkim/KeyTable
+
+dkim_signing_table="${sysconfdir}/opendkim/SigningTable"
+dkim_key_table="${sysconfdir}/opendkim/KeyTable"
+
+if [[ -f ${dkim_signing_table} && -f ${dkim_key_table} ]]; then
+        result=$(grep -v -E "^\*@${domain_name}\s+.+\._domainkey\.${domain_name}$" ${dkim_signing_table})
+        echo "${result}" > ${dkim_signing_table}
+        result=$(grep -v -E "^.+\._domainkey\.${domain_name}\s+${domain_name}:.+$" ${dkim_key_table})
+        echo "${result}" > ${dkim_key_table}
+fi
+
+dkim_domain_keys_dir="${sysconfdir}/dkimkeys/${domain_name}"
+if [[ -d ${dkim_domain_keys_dir} ]]; then
+        rm -r "${dkim_domain_keys_dir}"
+fi
+
+if [[ -x $(command -v opendkim) ]]; then
+	systemctl restart opendkim.service
+fi
+
+info "Done."
+echo
+
+
+
+exit 0

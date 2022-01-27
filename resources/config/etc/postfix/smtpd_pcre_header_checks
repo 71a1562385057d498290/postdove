@@ -1,0 +1,3 @@
+# Don't forget to replace host.domain.tld with your own server's FQDN if you uncomment this.
+#
+# /^Received: by host\.domain\.tld .*Postfix, from userid [0-9]+\)(.*)$/ REPLACE Received: by host.domain.tld (Postfix) $1

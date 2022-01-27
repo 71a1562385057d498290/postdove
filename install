@@ -1,0 +1,498 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Copyright (c) Attila Kovari
+# All rights reserved.
+#
+# MIT License
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ------------------------------------------------------------------------------
+
+
+
+myhostname=$1
+
+ubuntu_distr_id=$(lsb_release -is | tr '[:upper:]' '[:lower:]')
+ubuntu_release=$(lsb_release -rs)
+ubuntu_codename=$(lsb_release -cs)
+
+
+
+# checking current user
+CURRENT_USER=$(id -u)
+CURRENT_USER_NAME=$(id -un ${CURRENT_USER})
+
+[[ $CURRENT_USER -eq 0 ]] || {
+	echo "Sorry ${CURRENT_USER_NAME}, but I must be run as root!"
+	exit 1
+}
+
+# Checking if 'apt' version is supported
+apt_version=$(apt -v | cut -f2 -s -d " ")
+if [[ "${apt_version}" < "1.5.0" ]]; then
+	# https support was added to 'apt' in 1.5,
+	# thus removing the need to install the 'apt-transport-https' package
+	echo "'apt' version >=1.5 required but not installed."
+	exit 1
+fi
+
+# Checking if 'whiptail' is available.
+[[ -x $(command -v whiptail) ]] || {
+	echo "'whiptail', required for displaying user-friendly dialog boxes, is not installed."
+	exit 1
+}
+
+# Checking if 'gpg' is available.
+# Not present by default in the Debian 10 "buster" cloud images
+# [[ -x $(command -v gpg) ]] || {
+#	whiptail --yesno --title "GnuPG Required" "GnuPG is required but not installed. Would you like to install it now?" 0 0
+#	if [[ $? -eq 0 ]]; then
+#		apt install --assume-yes gpg
+#	else
+#		echo "'gpg' required but not installed."
+#		exit 1
+#	fi
+# }
+
+# Checking if 'openssl' is available.
+# It should already be present, but let's check it anyway
+[[ -x $(command -v openssl) ]] || {
+	# exit if not installed; let the user sort it out
+	echo "'openssl' required but not installed."
+	exit 1
+}
+
+# Create a '~/.rnd' seed file for openssl prior to 1.1.1a
+# Note: the RANDFILE option was removed from 'openssl.cnf' sometime around 1.1.1a
+# https://github.com/openssl/openssl/pull/7217
+openssl_version=$(openssl version | cut -f2 -s -d " ")
+if [[ "${openssl_version}" < "1.1.1a" ]]; then
+	if [[ ! -f ~/.rnd ]]; then
+		openssl rand -out ~/.rnd -writerand ~/.rnd
+	fi
+fi
+
+# Reset color scheme to default
+[[ -f /etc/newt/palette ]] && {
+	export NEWT_COLORS=
+}
+
+
+
+read -r -d '' MSG << EOF
+Please enter the fully-qualified domain name of this machine.
+This is used for setting the 'myhostname' and 'mydomain' Postfix parameters.
+
+For example, setting the fully-qualified domain name to 'hostname.example.net' will result in
+
+myhostname = hostname.example.net
+mydomain = example.net
+EOF
+
+[[ ! -z ${myhostname} ]] || {
+	myhostname=$(whiptail --inputbox "${MSG}" 0 0  --title "Postdove Setup" 3>&1 1>&2 2>&3)
+	[[  $? -eq 0 ]] || {
+		echo "Install canceled."
+		exit 0
+	}
+}
+
+[[ ! -z ${myhostname// } ]] || {
+	echo "You must provide a fully-qualified domain name"
+	exit 1
+}
+
+# Just a very basic validation.
+[[ $(echo ${myhostname} | grep -E "^([^. ]+)\.(([^. ]+)\.?[^. ]){1,}\.([^. ]+)$") ]] || {
+	echo "You must provide a fully-qualified domain name"
+	exit 1
+}
+
+# Get the parent domain of $myhostname
+mydomain=${myhostname#*.}
+
+# Location of system configuration files
+readonly sysconfdir="/etc"
+readonly syskeyring="/usr/share/keyrings"
+
+##### Upgrading system
+#####
+echo -e "\033[1;32mUpdating system\033[0m"
+apt update && apt upgrade --assume-yes
+
+
+
+##### Install Postfix
+#####
+echo -e "\033[1;32mInstalling Postfix\033[0m"
+debconf-set-selections <<< "postfix postfix/mailname string $1"
+debconf-set-selections <<< "postfix postfix/main_mailer_type select No configuration"
+
+apt install --assume-yes postfix postfix-pcre
+systemctl stop postfix.service
+
+
+
+##### Installing Dovecot
+#####
+echo -e "\033[1;32mInstalling Dovecot\033[0m"
+
+# More info at:
+#	https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=910654
+#	https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=970796
+#	https://bugs.launchpad.net/cloud-init/+bug/1836336
+#
+# Notes:
+#	- 'signed-by' is supported starting with APT 1.1
+#	- 'ASCII-armored' keys are supported starting with APT 1.4 (>= Debian 9 "stretch", >= Ubuntu 18.04 "bionic")
+
+# Setting up Dovecot's official repository as source for the dovecot packages
+dovecot_repo_key="${syskeyring}/dovecot.asc"
+dovecot_repo_lst="${sysconfdir}/apt/sources.list.d/dovecot.list"
+
+dovecot_version="2.3-latest"
+
+wget -q -O ${dovecot_repo_key} "https://repo.dovecot.org/DOVECOT-REPO-GPG"
+echo "deb [signed-by=${dovecot_repo_key}] https://repo.dovecot.org/ce-${dovecot_version}/${ubuntu_distr_id}/${ubuntu_codename} ${ubuntu_codename} main" > ${dovecot_repo_lst}
+
+apt update
+[[ $? -eq 0 ]] || {
+	echo "Error while executing 'apt update'."
+	# A possible reason might be that Dovecot's official repository is not, yet, available for our distribution (ex: Debian 11 "bullseye", at the time of this writing)
+	exit 1
+}
+
+apt install --assume-yes dovecot-core dovecot-imapd dovecot-lmtpd
+systemctl stop dovecot.service
+systemctl enable dovecot.service
+
+
+
+##### Installing policyd-spf
+#####
+echo -e "\033[1;32mInstalling policyd-spf\033[0m"
+apt install --assume-yes postfix-policyd-spf-python
+
+
+
+##### Installing Spamassassin
+#####
+echo -e "\033[1;32mInstalling SpamAssassin\033[0m"
+apt install --assume-yes spamassassin spamc
+systemctl enable spamassassin.service
+
+
+
+##### Installing spamass-milter
+#####
+echo -e "\033[1;32mInstalling spamass-milter\033[0m"
+# spamass-milter does not create its directory automatically
+[[ -d /var/lib/spamass-milter ]] || {
+	mkdir /var/lib/spamass-milter
+}
+apt install --assume-yes spamass-milter
+systemctl stop spamass-milter.service
+
+
+
+##### Installing OpenDKIM
+#####
+echo -e "\033[1;32mInstalling OpenDKIM\033[0m"
+apt install --assume-yes opendkim opendkim-tools
+systemctl stop opendkim.service
+
+
+
+##### TLS configuration
+#####
+
+# Generate a self-signed TLS certificate to be used by Postfix and Dovecot
+echo -e "\033[1;32mGenerating self-signed certificate for Postfix and Dovecot\033[0m"
+
+# Create directory to hold our certificate; copy ownership and permission from parent directory
+tls_cert_dir="${sysconfdir}/ssl/certs/local"
+if [[ ! -d ${tls_cert_dir} ]]; then
+	mkdir "${tls_cert_dir}"
+	parent=$(dirname "${tls_cert_dir}")
+
+	owner=$(stat -c "%u" "${parent}")
+	group=$(stat -c "%g" "${parent}")
+	perms=$(stat -c "%a" "${parent}")
+
+	chown ${owner}:${group} "${tls_cert_dir}"
+	chmod ${perms} "${tls_cert_dir}"
+fi
+
+# Create directory to hold our key; copy ownership and permission from parent directory
+tls_key_dir="${sysconfdir}/ssl/private/local"
+if [[ ! -d ${tls_key_dir} ]]; then
+	mkdir "${tls_key_dir}"
+	parent=$(dirname "${tls_key_dir}")
+
+	owner=$(stat -c "%u" "${parent}")
+	group=$(stat -c "%g" "${parent}")
+	perms=$(stat -c "%a" "${parent}")
+
+	chown ${owner}:${group} "${tls_key_dir}"
+	chmod ${perms} "${tls_key_dir}"
+fi
+
+# Generate the certificate
+tls_key="${tls_key_dir}/key.pem"
+tls_cert="${tls_cert_dir}/fullchain.pem"
+openssl req -x509 -newkey rsa:4096 -keyout "${tls_key}" -out "${tls_cert}" -days 365 -nodes -subj "/C=NA/ST=NA/L=NA/O=NA/OU=NA/CN=${myhostname}"
+
+
+
+##### Postfix configuration
+#####
+echo -e "\033[1;32mConfiguring Postfix\033[0m"
+
+# Copy the pre-defined configuration files
+postfix_config_dir="${sysconfdir}/postfix"
+cp "resources/config/etc/postfix"/* "${postfix_config_dir}"
+
+postfix_version=$(dpkg -s postfix | grep "Version" | cut -f2 -s -d " " | cut -f1 -s -d "-")
+if [[ "${postfix_version}" < "3.4.0" ]]; then
+	# comment out the postlog service; it is only available since 3.4.0
+	postconf "-M#" "postlog/unix-dgram"
+fi
+
+# Set 'myhostname'
+postconf -e "myhostname=${myhostname}"
+# Set 'mydomain'
+postconf -e "mydomain=${mydomain}"
+
+# generate dhparam file
+openssl dhparam -out "${postfix_config_dir}/dh2048.pem" 2048
+chmod 644 "${postfix_config_dir}/dh2048.pem"
+
+echo "Done."
+
+
+
+##### Dovecot configuration
+#####
+echo -e "\033[1;32mConfiguring Dovecot\033[0m"
+
+# Copy the pre-defined configuration files
+dovecot_config_dir="${sysconfdir}/dovecot"
+cp "resources/config/etc/dovecot"/* "${dovecot_config_dir}"
+
+chown root:dovecot "${dovecot_config_dir}/dovecot.deny"
+chmod 640 "${dovecot_config_dir}/dovecot.deny"
+
+chown root:dovecot "${dovecot_config_dir}/dovecot.passdb"
+chmod 640 "${dovecot_config_dir}/dovecot.passdb"
+
+chown root:dovecot "${dovecot_config_dir}/dovecot.userdb"
+chmod 640 "${dovecot_config_dir}/dovecot.userdb"
+
+# generate dhparam file
+openssl dhparam -out "${dovecot_config_dir}/private/dh2048.pem" 2048
+
+echo "Done."
+
+
+
+##### policyd-spf configuration
+#####
+echo -e "\033[1;32mConfiguring policyd-spf\033[0m"
+
+# Copy the pre-defined configuration files one by one
+policyd_config_dir="${sysconfdir}/postfix-policyd-spf-python"
+cp "resources/config/etc/postfix-policyd-spf-python"/* "${policyd_config_dir}"
+
+echo "Done."
+
+
+
+##### SpamAssassin configuration
+#####
+echo -e "\033[1;32mConfiguring SpamAssassin\033[0m"
+
+# Copy the pre-defined configuration files one by one
+spamassassin_config_dir="${sysconfdir}/spamassassin"
+cp "resources/config/etc/spamassassin"/* "${spamassassin_config_dir}"
+
+echo "Done."
+
+
+
+##### OpenDKIM configuration
+#####
+echo -e "\033[1;32mConfiguring OpenDKIM\033[0m"
+# We will use the Debian default directory, '/etc/dkimkeys', for storing keys.
+# In '${sysconfdir}/opendkim' we will store the different mappings.
+opendkim_dir="${sysconfdir}/opendkim"
+[[ -d ${opendkim_dir} ]] || {
+	mkdir "${opendkim_dir}"
+}
+
+cp "resources/config/etc/opendkim.conf" "${sysconfdir}"
+cp "resources/config/etc/opendkim"/* "${opendkim_dir}"
+
+chown -R opendkim:opendkim "${opendkim_dir}"
+chmod 0700 "${opendkim_dir}"
+chmod 0600 "${opendkim_dir}"/*
+
+echo "Done."
+
+
+
+##### Defaults configuration
+#####
+echo -e "\033[1;32mConfiguring defaults\033[0m"
+
+# Copy the pre-defined configuration files one by one
+default_config_dir="${sysconfdir}/default"
+cp "resources/config/etc/default"/* "${default_config_dir}"
+
+echo "Done."
+
+
+
+##### Installing and configuring Unbound
+#####
+read -r -d '' MSG << EOF
+Would you like to install Unbound DNS resolver?
+
+Some of the used DNSBL service providers are blocking requests from public DNS resolvers.
+This can lead to a reduced effectiveness of our anti-spam measures.
+Having your own local DNS resolver can help mitigate this.
+
+If you choose to install Unbound, don't forget to configure your system to use it for resolving DNS queries.
+
+You can always install a local DNS resolver at a later time.
+EOF
+
+whiptail --yesno --title "Unbound DNS Resolver" "${MSG}" 0 0
+[[ $? -eq 1 ]] || {
+	echo -e "\033[1;32mInstalling Unbound DNS resolver\033[0m"
+
+	apt install --assume-yes unbound
+	systemctl stop unbound.service
+
+	echo -e "\033[1;32mConfiguring Unbound\033[0m"
+
+	# Copy the pre-defined configuration files one by one
+	unbound_config_dir="${sysconfdir}/unbound"
+	cp "resources/config/etc/unbound"/* "${unbound_config_dir}"
+
+	echo "Done."
+}
+
+
+
+##### Restarting services
+##### Some future operations require some services, such as Dovecot, to be up and running
+#####
+echo "Restarting services"
+systemctl restart postfix.service
+systemctl restart dovecot.service
+systemctl restart spamass-milter.service
+systemctl restart spamassassin.service
+systemctl restart opendkim.service
+
+if [[ -x $(command -v unbound) ]]; then
+	systemctl restart unbound.service
+fi
+echo "Services restarted."
+
+
+
+##### Creating mailboxes and aliases
+#####
+(cd ./postnimda ; ./setup)
+whiptail --msgbox --nocancel --title "Postdove Setup" "${mydomain} will be added to the system by default." 0 0
+
+export POSTDOVE_INSTALLER=1
+(cd ./postnimda ; ./domain-add ${mydomain})
+unset POSTDOVE_INSTALLER
+
+virtual_alias_domains="${postfix_config_dir}/smtpd_map_virtual_alias_domains"
+virtual_aliases="${postfix_config_dir}/smtpd_map_virtual_aliases"
+local_aliases="${postfix_config_dir}/smtpd_local_aliases"
+
+read -r -d '' MSG << EOF
+The ${mydomain} domain was added to the system by default.
+
+Setup a collector mailbox that will receive all mails sent to the predefined aliases such as 'abuse' and 'postmaster'.
+Please note that this mailbox will be a fully functioning mailbox, accessible through IMAP.
+
+Make sure you secure it with a strong password!
+EOF
+
+collector_mailbox=""
+
+whiptail --msgbox --nocancel --ok-button "Next" --title "Postdove Setup" "${MSG}" 0 0
+while : ; do
+	collector_mailbox=$(whiptail --inputbox --nocancel "Enter the new email address:" 0 78 3>&1 1>&2 2>&3)
+
+	# for the email only a very basic validation is performed
+	if [[ ! $(echo "${collector_mailbox}" | grep -E "^[a-zA-Z0-9].*@${mydomain}$") ]]; then
+		whiptail --msgbox --title "Postdove Setup" "Invalid email address format. The address should be of the form 'user@${mydomain}'" 0 0
+	else
+		break
+	fi
+done
+
+(cd ./postnimda ; ./user-add ${collector_mailbox})
+
+echo "root:		root@${myhostname}" >> "${local_aliases}"
+echo "${myhostname}	OK" >> "${virtual_alias_domains}"
+
+read -r -d '' DATA << EOF
+postmaster@${myhostname}	root@${myhostname}
+abuse@${myhostname}		root@${myhostname}
+root@${myhostname}		root@${mydomain}
+
+MAILER-DAEMON@${mydomain}	root@${mydomain}
+postmaster@${mydomain}		root@${mydomain}
+abuse@${mydomain}		root@${mydomain}
+
+root@${mydomain}		${collector_mailbox}
+
+# ----- add new aliases below -----
+EOF
+
+echo -e "${DATA}" >> "${virtual_aliases}"
+
+postalias "${local_aliases}"
+for file in $(ls ${postfix_config_dir}/smtpd_map_* | grep -v -E ".*\.db$"); do
+	postmap "${file}"
+done
+
+
+
+##### Finished installation
+#####
+whiptail --title "Postdove Setup" --msgbox "Installation completed. Your email system is ready for use." 0 0
+
+# Restore to system color scheme
+[[ -f /etc/newt/palette ]] && {
+        export NEWT_COLORS=$(cat /etc/newt/palette)
+}
+
+echo "Done."
+
+
+
+exit 0

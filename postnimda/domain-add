@@ -1,0 +1,358 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Copyright (c) Attila Kovari
+# All rights reserved.
+#
+# MIT License
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ------------------------------------------------------------------------------
+
+
+
+source ./utils
+CONFIGFILE=./postnimda.cf
+
+USERNAME_PREFIX="vdu"
+# Virtual Domain User; Ubuntu forbids uppercase usernames by default
+# We could use --force-badname to override this.
+
+
+CURRENT_USER=$(id -u)
+CURRENT_USER_NAME=$(id -un ${CURRENT_USER})
+
+VIRTUAL_DOMAINS_HOME=""
+POSTFIX_VIRTUAL_DOMAINS_FILE=""
+POSTFIX_VIRTUAL_DOMAINS_UID_FILE=""
+POSTFIX_VIRTUAL_DOMAINS_GID_FILE=""
+
+# Location of system configuration files
+readonly sysconfdir="/etc"
+
+domain_name=$1
+
+[[ ${CURRENT_USER} -eq 0 ]] || {
+	# wrong user;
+        error "Sorry ${CURRENT_USER_NAME}, but I must be run as root!"
+	exit 1
+}
+
+[[ $# -eq 1 ]] || {
+	# more than one arguments provided
+	error "Invalid number of arguments. Please provide one single domain name."
+	exit 1
+}
+
+[[ -f ${CONFIGFILE} ]] || {
+	error "Config file does not exist! Please run setup first."
+	exit 1
+}
+
+[[ ! -z ${domain_name} ]] || {
+	# domain not provided
+	echo "Usage: $0 <domain-name>"
+	exit 1
+}
+
+# don't really care about complete domain name validation here.
+# just check that there is at least a '.' somewhere in the provided domain name
+[[ $(echo ${domain_name} | grep -E "^[a-zA-Z0-9].*\.[a-zA-Z0-9]+$") ]] || {
+	error "Invalid domain name"
+	exit 1
+}
+
+
+
+########## Read configuration from file
+##########
+source ${CONFIGFILE}
+
+sanity_check "${VIRTUAL_DOMAINS_HOME}"
+[[ $? -eq 0 ]] || {
+	error "'VIRTUAL_DOMAINS_HOME' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_UID_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_UID_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_GID_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_GID_FILE' is not set or invalid!"
+	exit 1
+}
+
+
+
+########## Checking if domain already present in Postfix
+##########
+echo
+info "Checking domain '${domain_name}' in Postfix."
+
+# check pattern: domain name followed by one or more whitespaces and terminated with OK
+[[ ! $(grep -E "^${domain_name}\s+OK$" ${POSTFIX_VIRTUAL_DOMAINS_FILE}) ]] || {
+	warning "Domain already in ${POSTFIX_VIRTUAL_DOMAINS_FILE}"
+	info "Nothing to do!"
+	exit 0
+}
+
+
+
+########## Create a random user for the virtual domain
+##########
+
+# Note: we'll create a group and user with the same name
+domain_owner_name="${USERNAME_PREFIX}$(openssl rand -hex 3)"
+domain_group_name=${domain_owner_name}
+
+cat << EOF
+
+Adding new user and group: [${domain_owner_name}:${domain_group_name}]
+This user will be the owner of the newly added '${domain_name}' virtual domain.
+
+EOF
+
+# add group
+if [[ ! $(getent group ${domain_group_name}) ]]; then
+	# group does not exist
+	addgroup ${domain_group_name}
+	[[ $? -eq 0 ]] || {
+		error "Failed to add new group!"
+		exit 1
+	}
+else
+	# group exists
+	warning "Group '${domain_group_name}' already exists. Selecting it for use!"
+	continue_check
+	echo
+fi
+
+# get the group id of the newly create group.
+domain_group_id=$(getent group ${domain_group_name} | cut -d ":" -f3)
+
+#add user
+if [[ ! $(id -u ${domain_owner_name} 2>/dev/null) ]]; then
+	# user does not exists
+	adduser --no-create-home --disabled-login --shell /usr/sbin/nologin --gid ${domain_group_id} --gecos ${domain_name} ${domain_owner_name}
+	[[ $? -eq 0 ]] || {
+		error "Failed to add new user!"
+		exit 1
+	}
+else
+	# user exists
+	warning "User '${domain_owner_name}' already exists. Selecting it for use!"
+	continue_check
+	echo
+fi
+
+# get the user id of the newly create user.
+domain_owner_id=$(id -u ${domain_owner_name})
+
+
+
+########## Creating new directory for the domain.
+##########
+echo
+info "Creating directory for domain: ${domain_name}"
+domain_home="${VIRTUAL_DOMAINS_HOME}/${domain_name}"
+
+if [[ ! -d ${domain_home} ]]; then
+	mkdir ${domain_home}
+	[[ $? -eq 0 ]] || {
+		error "Failed to create domain directory: ${domain_home}"
+		exit 1
+	}
+	info "Domain directory created: ${domain_home}"
+else
+	warning "Directory ${domain_home} already exists. Selecting it for use!"
+	continue_check
+	echo
+fi
+
+# setting domain directory ownership.
+info "Setting ownership for ${domain_home}"
+chown -R ${domain_owner_id}:${domain_group_id} ${domain_home}
+info "Ownership set to: ${domain_owner_name}:${domain_group_name} [${domain_owner_id}:${domain_group_id}]"
+
+# setting domain directory permissions
+info "Setting permissions for ${domain_home}"
+chmod 2770 ${domain_home}
+
+permissions=$(stat -c "%a" ${domain_home})
+info "Permissions set to: ${permissions}"
+echo
+
+
+
+########## Adding new domain to Postfix.
+##########
+info "Adding new domain to Postfix."
+echo "${domain_name}		OK" >> ${POSTFIX_VIRTUAL_DOMAINS_FILE}
+info "Domain added to ${POSTFIX_VIRTUAL_DOMAINS_FILE}"
+
+info "Setting domain UID."
+echo "@${domain_name}		${domain_owner_id}" >> ${POSTFIX_VIRTUAL_DOMAINS_UID_FILE}
+info "Domain UID set in ${POSTFIX_VIRTUAL_DOMAINS_UID_FILE}"
+
+info "Setting domain GID."
+echo "@${domain_name}		${domain_group_id}" >> ${POSTFIX_VIRTUAL_DOMAINS_GID_FILE}
+info "Domain GID set in ${POSTFIX_VIRTUAL_DOMAINS_GID_FILE}"
+echo
+
+info "Rebuilding Postfix maps."
+[[ -z "$(postmap ${POSTFIX_VIRTUAL_DOMAINS_FILE} 2>&1)" ]] || {
+	error "Failed to rebuild map for ${POSTFIX_VIRTUAL_DOMAINS_FILE}"
+	exit 1
+}
+
+[[ -z "$(postmap ${POSTFIX_VIRTUAL_DOMAINS_UID_FILE} 2>&1)" ]] || {
+	error "Failed to rebuild map for ${POSTFIX_VIRTUAL_DOMAINS_UID_FILE}"
+	exit 1
+}
+
+[[ -z "$(postmap ${POSTFIX_VIRTUAL_DOMAINS_GID_FILE} 2>&1)" ]] || {
+	error "Failed to rebuild map for ${POSTFIX_VIRTUAL_DOMAINS_GID_FILE}"
+	exit 1
+}
+info "Postfix maps re-built!"
+echo
+
+
+
+########## Setting up DKIM for the new domain.
+##########
+
+# https://manpages.ubuntu.com/manpages/focal/en/man8/opendkim.8.html
+#
+# "A message will be verified unless it conforms to the signing criteria, which are: (1)  the
+# domain  on  the From: address (if present) must be listed by the -d command line switch or
+# the Domain configuration file setting, and (2) (a) the client connecting to the  MTA  must
+# have  authenticated,  or  (b)  the client connecting to the MTA must be listed in the file
+# referenced by the InternalHosts configuration file setting (or be in the default list  for
+# that  option),  or  (c)  the  client  must be connected to a daemon port named by the MTAs
+# configuration file setting, or (d) the MTA must have set one or more macros  matching  the
+# criteria set by the MacroList configuration file setting."
+
+info "Checking if 'opendkim' and 'opendkim-genkey' are available."
+if [[ -x $(command -v opendkim) && -x $(command -v opendkim-genkey) && -d ${sysconfdir}/dkimkeys ]]; then
+
+	# Generating key and creating mappings
+	info "Configuring DKIM for ${domain_name}"
+	opendkim_domain_key_dir="${sysconfdir}/dkimkeys/${domain_name}"
+
+	[[ -d ${opendkim_domain_key_dir} ]] || {
+		mkdir "${opendkim_domain_key_dir}"
+		chmod 0700 "${opendkim_domain_key_dir}"
+		chown opendkim:opendkim "${opendkim_domain_key_dir}"
+	}
+
+read -r -d '' MSG << EOF
+Select the key size, in bits,
+for the generated DKIM key used for signing all the messages sent from the ${domain_name} domain
+EOF
+
+	# just some eye candy nonsense
+	fill=""
+	line_length=$(( ${#MSG} - 30 ))
+	fill_length=$(( ${line_length} - 78 - 6 ))
+	if (( ${fill_length} > 0 )); then
+		fill=$(printf ' %.0s' $(seq 1 ${fill_length}))
+	fi
+
+	opendkim_selector="vds$(openssl rand -hex 3)"
+	opendkim_key_size=$(whiptail --title "Generating DKIM key for ${domain_name}" --nocancel --radiolist "${MSG}" 0 0 0 \
+				"1024" "Default" ON \
+				"2048" "If your DNS provider supports TXT records longer than 255 characters${fill}" OFF 3>&1 1>&2 2>&3)
+
+	opendkim-genkey -b ${opendkim_key_size} -d ${domain_name} -D "${opendkim_domain_key_dir}" -s ${opendkim_selector} -v
+	chown opendkim:opendkim "${opendkim_domain_key_dir}"/*
+
+	# Assuming KeyTable and SigningTable are located at:
+	#	${sysconfdir}/opendkim/KeyTable
+	#	${sysconfdir}/opendkim/SigningTable
+
+	echo "*@${domain_name}	${opendkim_selector}._domainkey.${domain_name}" >> "${sysconfdir}/opendkim/SigningTable"
+	abc="${domain_name}:${opendkim_selector}:${sysconfdir}/dkimkeys/${domain_name}/${opendkim_selector}.private"
+	echo "${opendkim_selector}._domainkey.${domain_name}	${abc}" >> "${sysconfdir}/opendkim/KeyTable"
+
+	info "Restarting OpenDKIM"
+	systemctl restart opendkim.service
+	info "DKIM configured."
+
+read -r -d '' MSG << EOF
+Your DKIM DNS TXT record file is located at: ${sysconfdir}/dkimkeys/${domain_name}/${opendkim_selector}.txt
+Don't forget to add the DKIM and SPF records to your authoritative DNS server.
+EOF
+	whiptail --title "DKIM DNS TXT record for ${domain_name}" --msgbox "${MSG}" 0 0
+else
+	info "OpenDKIM and/or the OpenDKIM CLI Tools might no be present. No keys were generated."
+fi
+
+
+
+if [[ ! ${POSTDOVE_INSTALLER} -eq 1 ]]; then
+read -r -d '' MSG << EOF
+Domain ${domain_name} was added to the system.
+
+Set up aliases for 'postmaster@${domain_name}' and 'abuse@${domain_name}'
+so that all mail sent to these addresses will be forwarded to the previously created collector mailbox?
+
+Select no if you prefer to manually configure the 'postmaster' and 'abuse' mailboxes.
+Select no if you have previously edited the installer created virtual aliases.
+EOF
+
+	whiptail --yesno --title "Postdove Setup" "${MSG}" 0 0
+        if [[ $? -eq 0 ]]; then
+		# Ha, ha, this check should be moved to the beginning of the script. Too lazy to move it now.
+		if [[ -x $(command -v postconf) && -x $(command -v postmap) ]]; then
+	                virtual_alias_maps=$(postconf -xh virtual_alias_maps)
+			virtual_alias_maps_file=$(echo ${virtual_alias_maps} | cut -f2 -d ":")
+
+			# We can forward to the collector mailbox directly
+			# or to the root@$mydomain alias, which in turn is forwarded to the collector mailbox.
+			# For now we will forward to root@$mydomain.
+			target=$(postconf -xh mydomain)
+
+			echo "abuse@${domain_name}              root@${target}" >> ${virtual_alias_maps_file}
+			echo "postmaster@${domain_name}         root@${target}" >> ${virtual_alias_maps_file}
+			postmap ${virtual_alias_maps_file}
+		else
+			whiptail --title "Postdove Setup" --msgbox "Postconf or postmap not found. Aliases not created." 0 0
+		fi
+        else
+		whiptail --title "Postdove Setup" --msgbox "Don't forget to set up the required 'postmaster' and 'abuse' mailboxes." 0 0
+	fi
+fi
+
+info "Done."
+echo
+
+
+
+exit 0

@@ -1,0 +1,182 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Copyright (c) Attila Kovari
+# All rights reserved.
+#
+# MIT License
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ------------------------------------------------------------------------------
+
+
+
+source ./utils
+CONFIGFILE=./postnimda.cf
+
+CURRENT_USER=$(id -u)
+CURRENT_USER_NAME=$(id -un ${CURRENT_USER})
+
+virtual_user=$1
+
+VIRTUAL_DOMAINS_HOME=""
+POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE=""
+DOVECOT_USERDB_FILE=""
+DOVECOT_PASSDB_FILE=""
+
+
+
+[[ ${CURRENT_USER} -eq 0 ]] || {
+        error "Sorry ${CURRENT_USER_NAME}, but I must be run as root!"
+	exit 1
+}
+
+[[ -f ${CONFIGFILE} ]] || {
+	error "Config file does not exist! Please run setup first."
+	exit 1
+}
+
+[[ ! -z ${virtual_user} ]] || {
+	echo "Usage: $0 <user@domain>"
+	exit 1
+}
+
+virtual_u=$(echo "${virtual_user}" | cut -f1 -s -d "@")
+virtual_d=$(echo "${virtual_user}" | cut -f2 -s -d "@")
+
+[[ ! -z ${virtual_u} && ! -z ${virtual_d} ]] || {
+	echo "Usage: $0 <user@domain>"
+	exit 1
+}
+
+
+
+########## Read configuration from file
+##########
+source ${CONFIGFILE}
+
+sanity_check "${VIRTUAL_DOMAINS_HOME}"
+[[ $? -eq 0 ]] || {
+	error "'VIRTUAL_DOMAINS_HOME' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${DOVECOT_USERDB_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'DOVECOT_USERDB_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${DOVECOT_PASSDB_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'DOVECOT_PASSDB_FILE' is not set or invalid!"
+	exit 1
+}
+
+
+
+########## Removing user from Postfix
+##########
+info "${virtual_user}: removing user from Postfix."
+prompt_yes_no
+if [[ $? -eq 0 ]]; then
+	# assuming one entry per line
+	# assuming entries have the following form: 'user@domain %d/%u/Maildir/'
+	result=$(grep -v -E "^${virtual_user}\s+${virtual_d}/${virtual_u}.+/$" ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE})
+	echo "${result}" > ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}
+	info "User '${virtual_user}' was removed from Postfix!"
+	info "Rebuilding Postfix maps."
+
+	[[ -z "$(postmap ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE} 2>&1)" ]] || {
+		error "Failed to rebuild map for ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}"
+		exit 1
+	}
+
+	info "Postfix maps re-built."
+else
+	info "User '${virtual_user}' was not removed."
+fi
+echo
+
+
+
+########## Removing user from Dovecot
+##########
+info "${virtual_user}: removing user from Dovecot."
+prompt_yes_no
+if [[ $? -eq 0 ]]; then
+	# remove user from passdb; assuming one entry per line
+	result=$(grep -v -E "^${virtual_user}:.+$" ${DOVECOT_PASSDB_FILE})
+	echo "${result}" > ${DOVECOT_PASSDB_FILE}
+
+	# remove user from userdb too if passdb and userdb files are not the same
+	if [[ ${DOVECOT_USERDB_FILE} != ${DOVECOT_PASSDB_FILE} ]]; then
+		result=$(grep -v -E "^${virtual_user}:.+$" ${DOVECOT_USERDB_FILE})
+		echo "${result}" > ${DOVECOT_USERDB_FILE}
+	fi
+	info "User '${virtual_user}' was removed from Dovecot!"
+else
+	info "User '${virtual_user}' was not removed."
+fi
+echo
+
+
+
+########## Deleting user's directory from the filesystem
+##########
+virtual_domain_home="${VIRTUAL_DOMAINS_HOME}/${virtual_d}"
+
+[[ -d "${virtual_domain_home}" ]] || {
+	warning "Domain home directory does not exist."
+	exit 1
+}
+
+virtual_user_home="${virtual_domain_home}/${virtual_u}"
+
+info "${virtual_user}: deleting user's home directory from the filesystem."
+warning "The user's directory and all of its content will be permanently deleted from the filesystem!"
+warning "Directory to be deleted: ${virtual_user_home}"
+
+continue_check
+
+if [[ -d ${virtual_user_home} ]]; then
+	rm -r "${virtual_user_home}"
+	[[ $? -eq 0 ]] || {
+       		error "Failed to delete directory ${virtual_user_home}"
+	        exit 1
+	}
+	info "User directory for '${virtual_user}' was deleted!"
+else
+	warning "User directory ${virtual_user_home} does not exist."
+fi
+
+echo
+
+info "Done."
+echo
+
+
+
+exit 0

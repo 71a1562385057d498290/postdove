@@ -1,0 +1,36 @@
+# spamass-milt startup defaults
+
+# OPTIONS are passed directly to spamass-milter.
+# man spamass-milter for details
+
+# Non-standard configuration notes:
+# See README.Debian if you use the -x option with sendmail
+# You should not pass the -d option in OPTIONS; use SOCKET for that.
+
+# Default, use the spamass-milter user as the default user, ignore
+# messages from localhost
+# OPTIONS="-u spamass-milter -i 127.0.0.1"
+
+# Custom milter options
+# Reject emails with spamassassin scores > 10
+OPTIONS="-I -i 127.0.0.1 -r 10 -- -s 10485760 -u debian-spamd -d 127.0.0.1"
+
+# -I Ignores messages if the sender has authenticated via SMTP AUTH.
+# -i networks
+#	Ignores messages if the originating IP is in the network(s) listed. The message will be passed through without calling SpamAssassin at all.
+
+# Reject emails with spamassassin scores > 15.
+#OPTIONS="${OPTIONS} -r 15"
+
+# Do not modify Subject:, Content-Type: or body.
+#OPTIONS="${OPTIONS} -m"
+
+######################################
+# If /usr/sbin/postfix is executable, the following are set by
+# default. You can override them by uncommenting and changing them
+# here.
+######################################
+# SOCKET="/var/spool/postfix/spamass/spamass.sock"
+# SOCKETOWNER="postfix:postfix"
+# SOCKETMODE="0660"
+######################################

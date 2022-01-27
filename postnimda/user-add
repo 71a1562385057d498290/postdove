@@ -1,0 +1,370 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Copyright (c) Attila Kovari
+# All rights reserved.
+#
+# MIT License
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ------------------------------------------------------------------------------
+
+
+
+source ./utils
+CONFIGFILE=./postnimda.cf
+
+CURRENT_USER=$(id -u)
+CURRENT_USER_NAME=$(id -un ${CURRENT_USER})
+
+virtual_user=$1
+
+VIRTUAL_DOMAINS_HOME=""
+POSTFIX_VIRTUAL_DOMAINS_FILE=""
+POSTFIX_VIRTUAL_DOMAINS_UID_FILE=""
+POSTFIX_VIRTUAL_DOMAINS_GID_FILE=""
+POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE=""
+DOVECOT_USERDB_FILE=""
+DOVECOT_PASSDB_FILE=""
+DOVECOT_PASSDB_SCHEME=""
+
+
+
+[[ ${CURRENT_USER} -eq 0 ]] || {
+        error "Sorry ${CURRENT_USER_NAME}, but I must be run as root!"
+	exit 1
+}
+
+[[ -f ${CONFIGFILE} ]] || {
+	error "Config file does not exist! Please run setup first."
+	exit 1
+}
+
+[[ ! -z ${virtual_user} ]] || {
+	echo "Usage: $0 <user@domain>"
+	exit 1
+}
+
+virtual_u=$(echo "${virtual_user}" | cut -f1 -s -d "@")
+virtual_d=$(echo "${virtual_user}" | cut -f2 -s -d "@")
+
+[[ ! -z ${virtual_u} && ! -z ${virtual_d} ]] || {
+	echo "Usage: $0 <user@domain>"
+	exit 1
+}
+
+
+
+########## Read configuration from file
+##########
+source ${CONFIGFILE}
+
+sanity_check "${VIRTUAL_DOMAINS_HOME}"
+[[ $? -eq 0 ]] || {
+	error "'VIRTUAL_DOMAINS_HOME' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_UID_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_UID_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_GID_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_GID_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${DOVECOT_USERDB_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'DOVECOT_USERDB_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${DOVECOT_PASSDB_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'DOVECOT_PASSDB_FILE' is not set or invalid!"
+	exit 1
+}
+
+# sanity check for default encryption scheme
+[[ ! -z  ${DOVECOT_PASSDB_SCHEME} ]] || {
+	error "Default encryption scheme is not set."
+	exit 1
+}
+
+virtual_domain_home="${VIRTUAL_DOMAINS_HOME}/${virtual_d}"
+virtual_user_home="${virtual_domain_home}/${virtual_u}"
+virtual_user_maildir="${virtual_user_home}/Maildir"
+
+echo
+
+# verify that the domain directory already exists on the local filesystem
+[[ -d $virtual_domain_home ]] || {
+	error "Can not find domain directory ${virtual_domain_home}. Please check your configuration."
+	echo
+	exit 1
+}
+
+# get the UID and GID of the domain directory; we need to use these leter
+virtual_user_uid=$(stat -c "%u" "${virtual_domain_home}")
+[[ $? -eq 0 ]] || {
+	error "Failed to get UID from ${virtual_domain_home}. Exiting."
+	exit 1
+}
+
+virtual_user_gid=$(stat -c "%g" "${virtual_domain_home}")
+[[ $? -eq 0 ]] || {
+	error "Failed to get GID from ${virtual_domain_home}. Exiting."
+	exit 1
+}
+
+
+
+# verify that the domain is already in Postfix's list of virtual domains
+[[ $(grep -E "^${virtual_d}\s+OK$" ${POSTFIX_VIRTUAL_DOMAINS_FILE}) ]] || {
+cat << EOF
+Domain '${virtual_d}' not found in Postfix.
+Until the '${virtual_d}' domain is not added to Postfix the user '${virtual_user}'
+will not be able to receive mail.
+EOF
+
+continue_check
+echo
+}
+
+
+
+########## Prompt the user for the password and encryption preferences
+##########
+# get the default password encryption scheme
+default_encryption_scheme=${DOVECOT_PASSDB_SCHEME}
+# create new password for the user
+password=""
+
+while : ; do
+	password=$(whiptail --passwordbox "Enter new password:" 8 78 --title "${virtual_user}" 3>&1 1>&2 2>&3)
+	[[ $? -eq 0 ]] || {
+		warning "Operation cancelled"
+		exit 1
+	}
+	password_repeat=$(whiptail --passwordbox "Re-type password:" 8 78 --title "${virtual_user}" 3>&1 1>&2 2>&3)
+
+	# passwords must match and have a length > 0
+	if [[ ${password} != ${password_repeat} || ${#password} -lt 1 ]]; then
+		whiptail --msgbox --title "Password issue" "Mismatched or invalid passwords! Please try again." 0 0
+	else
+		break
+	fi
+done
+
+# we'll use this later
+# virtual_user_password=$(doveadm pw -s ${default_encryption_scheme} -u ${virtual_user} -p ${password})
+# avoid password being shown in output of PS,TOP, etc ...
+virtual_user_password=$(echo "${password}" | sed p | doveadm pw -s ${default_encryption_scheme} -u ${virtual_user})
+
+# get the user's encryption preferences
+read -r -d '' MSG << EOF
+Mailbox encryption is enabled by default.
+Would you like to disable encryption for the ${virtual_user} mailbox?
+
+NOTE:
+This option will have no effect on a already existing mailbox.
+Even so, you should really not run this tool for existing mailboxes!
+
+WARNING:
+The master key will be encrypted with the mailbox password.
+If you lose or forget the password, all messages will be unrecoverable!
+EOF
+
+virtual_user_crypt=""
+whiptail --yesno --title "${virtual_user}" --defaultno "${MSG}" 0 0
+[[ $? -eq 1 ]] || {
+	virtual_user_crypt="userdb_mail_crypt_save_version=0"
+}
+
+# NOTE:
+# Selectively enabling or disabling encryption per user, relies on the fact that the 'mail_crypt_save_version' parameter
+# from the plugin section is overridden with the value from userdb for the selected users.
+#
+# We also rely on Dovecot being configured in a certain way. If you change the configuration, you MUST update this script accordingly.
+#
+# mail_crypt_save_version = 0 - keys generated when the user is created but no email will be encrypted; previously encrypted mail can still be read
+# mail_crypt_save_version = 2 - keys generated when the user is created and all email will be encrypted
+# passdb - userdb_mail_crypt_private_password=%{sha256:password}
+# userdb - userdb_mail_crypt_save_version=(0|2)
+
+
+
+# http://www.postfix.org/VIRTUAL_README.html
+#
+# Note: mail delivery happens with the recipient's UID/GID privileges specified with virtual_uid_maps and virtual_gid_maps.
+# Postfix 2.0 and earlier will not create mailDIRs in world-writable parent directories; you must create them in advance before you can use them.
+# Postfix may be able to create mailBOX files by itself, depending on parent directory write permissions, but it is safer to create mailBOX files ahead of time.
+#
+# NOTE: We will create the user's Maildir without relying on Postfix or Dovecot to create them for us.
+
+
+
+########## Checking and adding new user to Postfix
+##########
+info "Checking user '${virtual_user}' in Postfix."
+if [[ ! $(grep -E "^${virtual_user}\s+.+/Maildir/$" ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}) ]]; then
+	info "Adding user '${virtual_user}' to Postfix."
+	echo "${virtual_user}		${virtual_d}/${virtual_u}/Maildir/" >> ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}
+
+	info "Rebuilding Postfix maps."
+	# check that postmap exits without warnings and errors
+	[[ -z "$(postmap ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE} 2>&1)" ]] || {
+		error "Failed to rebuild map for ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}"
+		exit 1
+	}
+else
+	warning "User already present in ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}. Will not be added."
+fi
+
+
+
+########## Adding user to Dovecot
+##########
+info "Adding user '${virtual_user}' to Dovecot."
+# we assume that the user/password data is stored in passwd-files
+if [[ ! $(grep -E "^${virtual_user}:" ${DOVECOT_PASSDB_FILE}) ]]; then
+	# if passdb file is different from the userdb file
+	if [[ ${DOVECOT_USERDB_FILE} != ${DOVECOT_PASSDB_FILE} ]]; then
+		info "Adding user to passdb."
+		echo "${virtual_user}:${virtual_user_password}" >> ${DOVECOT_PASSDB_FILE}
+		echo "${virtual_user}::${virtual_user_uid}:${virtual_user_gid}::${virtual_user_home}::userdb_mail=maildir:${virtual_user_maildir} ${virtual_user_crypt}" >> ${DOVECOT_USERDB_FILE}
+	else
+		info "Adding user to userdb."
+		echo "${virtual_user}:${virtual_user_password}:${virtual_user_uid}:${virtual_user_gid}::${virtual_user_home}::userdb_mail=maildir:${virtual_user_maildir} ${virtual_user_crypt}" >> ${DOVECOT_USERDB_FILE}
+	fi
+	info "User was added."
+else
+	warning "User already present in ${DOVECOT_PASSDB_FILE}. Will not be added."
+fi
+
+
+
+########## Creating the user's home directory on the local filesystem
+##########
+info "Creating home directory for '${virtual_user}'"
+if [[ ! -d ${virtual_user_home} ]]; then
+	mkdir "${virtual_user_home}"
+	[[ $? -eq 0 ]] || {
+		error "Failed to create home directory."
+		exit 1
+	}
+	info "Home directory added."
+
+	info "Setting ownership for ${virtual_user_home}"
+	chown -R ${virtual_user_uid}:${virtual_user_gid} "${virtual_user_home}"
+	info "Setting permissions for ${virtual_user_home}"
+	chmod 0700 "${virtual_user_home}"
+else
+	warning "Home directory already exists for ${virtual_user} at ${virtual_user_home}. Directory was not created."
+fi
+
+
+
+########## Creating the user's Maildir on the local filesystem
+##########
+info "Creating Maildir directory for '${virtual_user}'"
+if [[ ! -d ${virtual_user_maildir} ]]; then
+	mkdir "${virtual_user_maildir}"
+	[[ $? -eq 0 ]] || {
+		error "Failed to create Maildir directory."
+		exit 1
+	}
+
+	mkdir "${virtual_user_maildir}/"{cur,new,tmp}
+	[[ $? -eq 0 ]] || {
+		error "Failed to create Maildir sub-directories."
+		exit 1
+	}
+	info "Maildir directory added."
+
+	info "Setting ownership for ${virtual_user_maildir}"
+	chown -R ${virtual_user_uid}:${virtual_user_gid} "${virtual_user_maildir}"
+	info "Setting permissions for ${virtual_user_maildir}"
+	chmod 0700 "${virtual_user_maildir}"
+	chmod 0700 "${virtual_user_maildir}/"{cur,new,tmp}
+else
+	warning "Maildir directory already exists for ${virtual_user} at ${virtual_user_maildir}. Directory was not created."
+fi
+echo
+
+
+
+########## Generating userkey
+##########
+info "Generating userkey for ${virtual_user}"
+password_hash=$(echo -n "${virtual_user}${password}" | sha256sum | tr -d "[:space:]-")
+
+# without the '-f' option, if a userkey already exists it will not be overwritten.
+# DO NOT use the '-f' option here.
+
+# avoid password being shown in output of PS,TOP, etc ...
+#
+# 1. check if a userkey already exists
+# 2. create use key with an empty password
+# 3. set a password for the new user key
+#
+# Note: the 'dummy' part is a workaround of an issue in doveadm version 2.3.14.
+doveadm mailbox cryptokey list -u ${virtual_user} -U 2>&1 | grep "yes" > /dev/null
+if [[ $? -eq 0 ]]; then
+        warning "Userkey already exists. Will not be generated."
+else
+	# because mail_crypt_require_encrypted_user_key is set to 'yes' in our config,
+	# we need to use the -o option here even if we use an empty password when generating the userkey
+	doveadm -o plugin/mail_crypt_private_password="" mailbox cryptokey generate -u "${virtual_user}" -U
+	doveadm mailbox cryptokey password -u "${virtual_user}" -N -O \
+<<EOF
+
+${password_hash}
+${password_hash}
+EOF
+	[[ $? -eq 0 ]] || {
+		error "Error generating userkey."
+		exit 1
+	}
+	info "Userkey created."
+fi
+echo
+
+info "Done."
+echo
+
+
+
+exit 0

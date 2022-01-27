@@ -1,0 +1,3 @@
+localhost		REJECT	Not allowed
+localhost.localdomain	REJECT	Not allowed
+[127.0.0.1]		REJECT	IP not allowed

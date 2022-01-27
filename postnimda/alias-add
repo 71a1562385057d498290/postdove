@@ -1,0 +1,159 @@
+#!/bin/bash
+
+# ------------------------------------------------------------------------------
+# Copyright (c) Attila Kovari
+# All rights reserved.
+#
+# MIT License
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# ------------------------------------------------------------------------------
+
+
+
+source ./utils
+CONFIGFILE=./postnimda.cf
+
+CURRENT_USER=$(id -u)
+CURRENT_USER_NAME=$(id -un ${CURRENT_USER})
+
+virtual_user=$1
+
+POSTFIX_VIRTUAL_DOMAINS_FILE=""
+POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE=""
+POSTFIX_VIRTUAL_ALIAS_MAPS_FILE=""
+
+
+
+[[ ${CURRENT_USER} -eq 0 ]] || {
+        error "Sorry ${CURRENT_USER_NAME}, but I must be run as root!"
+        exit 1
+}
+
+[[ -f ${CONFIGFILE} ]] || {
+        error "Config file does not exist! Please run setup first."
+        exit 1
+}
+
+[[ ! -z ${virtual_user} ]] || {
+        echo "Usage: $0 <alias@domain>"
+        exit 1
+}
+
+virtual_u=$(echo "${virtual_user}" | cut -f1 -s -d "@")
+virtual_d=$(echo "${virtual_user}" | cut -f2 -s -d "@")
+
+[[ ! -z ${virtual_u} && ! -z ${virtual_d} ]] || {
+        echo "Usage: $0 <user@domain>"
+        exit 1
+}
+
+
+
+########## Read configuration from file
+##########
+source ${CONFIGFILE}
+
+sanity_check "${POSTFIX_VIRTUAL_DOMAINS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_DOMAINS_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE' is not set or invalid!"
+	exit 1
+}
+
+sanity_check "${POSTFIX_VIRTUAL_ALIAS_MAPS_FILE}"
+[[ $? -eq 0 ]] || {
+	error "'POSTFIX_VIRTUAL_ALIAS_MAPS_FILE' is not set or invalid!"
+	exit 1
+}
+
+
+
+########## Additional checks
+##########
+
+# Check that 'postmap' is available
+[[ -x $(command -v postmap) ]] || {
+	error "'postmap' required but not installed."
+	exit 1
+}
+
+# Check that the domain was already added to Postfix's list of virtual domains
+[[ $(grep -E "^${virtual_d}\s+OK$" ${POSTFIX_VIRTUAL_DOMAINS_FILE}) ]] || {
+	error "Domain '${virtual_d}' not found in Postfix."
+	exit 1
+}
+
+
+
+########## Addiing a new alias to the system
+##########
+target_mailbox=""
+
+while : ; do
+	target_mailbox=$(whiptail --inputbox --nocancel "Enter the target mailbox address:" 0 78 3>&1 1>&2 2>&3)
+
+	# for the target mailbox only a very basic validation is performed
+	if [[ ! $(echo "${target_mailbox}" | grep -E "^[a-zA-Z0-9].*@${virtual_d}$") ]]; then
+		whiptail --msgbox --title "Add new alias" "Invalid target mailbox format. The address should be of the form 'user@${virtual_d}'" 0 0
+	else
+		break
+	fi
+done
+
+# The default database type ('hash' in our case) is used with the 'postmap' command
+lookup=$(postmap -q ${virtual_user} ${POSTFIX_VIRTUAL_ALIAS_MAPS_FILE} 2>&1)
+if [[ $? -eq 1 ]]; then
+        if [[ -z ${lookup} ]]; then
+                if [[ $(grep -E "^${target_mailbox}\s+.+/Maildir/$" ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}) ]]; then
+                        info "Adding alias '${virtual_user}' -> '${target_mailbox}' to Postfix."
+			echo "${virtual_user}		${target_mailbox}" >> ${POSTFIX_VIRTUAL_ALIAS_MAPS_FILE}
+
+			info "Rebuilding Postfix maps."
+			[[ -z "$(postmap ${POSTFIX_VIRTUAL_ALIAS_MAPS_FILE} 2>&1)" ]] || {
+				error "Failed to rebuild map for ${POSTFIX_VIRTUAL_ALIAS_MAPS_FILE}"
+				exit 1
+			}
+			info "Postfix maps re-built!"
+			echo
+                else
+                        error "Target mailbox not present in ${POSTFIX_VIRTUAL_MAILBOX_MAPS_FILE}."
+			exit 1
+                fi
+        else
+                error "An error occured. Alias will not be added."
+		error "${lookup}"
+		exit 1
+        fi
+else
+        error "Alias already present. Duplicate alias will not be added."
+	exit 1
+fi
+
+info "Done."
+echo
+
+
+
+exit 0
