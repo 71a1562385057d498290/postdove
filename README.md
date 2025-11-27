@@ -1,7 +1,7 @@
 # Postdove
 
 A set of, somewhat opinionated, **bash** scripts for installing a clean Postfix + Dovecot environment  
-with as few *moving parts* as possible, while still providing a fully functioning emailing system capable of hosting mail for multiple domains.  
+with as few *moving parts* as possible, while still providing a fully functioning mailing system capable of hosting mail for multiple domains.  
 
 &nbsp;
 # Requirements
